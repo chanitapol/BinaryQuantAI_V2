@@ -3,6 +3,7 @@ from models.hypothesis_engine import HypothesisEngine
 from models.validation_engine import ValidationEngine
 from models.experiment_manager import ExperimentManager
 from models.experiment_runner import ExperimentRunner
+from models.dataset_splitter import split_dataframe
 
 
 FEATURE_RULES = {
@@ -20,19 +21,30 @@ def main() -> None:
     experiment_manager = ExperimentManager()
     hypothesis_engine = HypothesisEngine()
     validator = ValidationEngine()
-    runner = ExperimentRunner(target_col="return_1")
+    runner = ExperimentRunner()
 
     try:
         df = feature_engine.run()
         print(f"Loaded and engineered features: {len(df):,} rows, {len(df.columns):,} columns")
+
+        split = split_dataframe(df, train_ratio=0.70, validation_ratio=0.15)
+        print(
+            f"Split -> train: {len(split.train):,}, validation: {len(split.validation):,}, test: {len(split.test):,}"
+        )
 
         generated = list(hypothesis_engine.generate(FEATURE_RULES, max_features=3))
         print(f"Generated hypotheses: {len(generated):,}")
 
         accepted = 0
         for hyp in generated:
-            result = runner.evaluate(df, hyp)
-            validation = validator.evaluate(winrate=result.winrate, occurrence=result.occurrence)
+            train_result = runner.evaluate(split.train, hyp)
+            validation_result = runner.evaluate(split.validation, hyp)
+            test_result = runner.evaluate(split.test, hyp)
+
+            validation = validator.evaluate(
+                winrate=validation_result.winrate,
+                occurrence=validation_result.occurrence,
+            )
 
             exp = experiment_manager.create(
                 hypothesis=hyp.id,
@@ -43,9 +55,9 @@ def main() -> None:
                 dataset="feature_frame",
             )
             exp.status = "PASS" if validation.passed else "REJECT"
-            exp.train_win = result.winrate
-            exp.validation_win = result.winrate
-            exp.test_win = result.winrate
+            exp.train_win = train_result.winrate
+            exp.validation_win = validation_result.winrate
+            exp.test_win = test_result.winrate
             experiment_manager.save(exp)
 
             if validation.passed:
