@@ -62,6 +62,17 @@ def main() -> None:
             exp.test_win = test_result.winrate
             experiment_manager.save(exp)
 
+            status = "PASS" if validation.passed else "REJECT"
+            print(
+                f"{hyp.id} | {status} | "
+                f"train={train_result.winrate:.4f} | "
+                f"val={validation_result.winrate:.4f} | "
+                f"test={test_result.winrate:.4f} | "
+                f"occ={validation_result.occurrence} | "
+                f"gap={validation.gap:.4f} | "
+                f"reason={validation.reason}"
+            )
+
             if validation.passed:
                 accepted += 1
 
