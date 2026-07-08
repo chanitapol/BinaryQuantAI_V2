@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable
 
 import numpy as np
 import pandas as pd
@@ -110,11 +109,12 @@ class FeatureFactory:
         out["momentum_5"] = g[self.config.close_col].transform(lambda s: s.diff(5))
         out["trend_5"] = self._safe_div(c - out["rolling_mean_5"], out["rolling_mean_5"])
         out["trend_20"] = self._safe_div(c - out["rolling_mean_20"], out["rolling_mean_20"])
+        out["atr_14"] = g["range"].transform(lambda s: s.rolling(14, min_periods=1).mean())
 
         # Candle regime / structure
         out["higher_high"] = (h > g[self.config.high_col].shift(1)).astype(np.int8)
         out["lower_low"] = (l < g[self.config.low_col].shift(1)).astype(np.int8)
-        out["inside_bar"] = ((h <= out["prev_close"].combine(h, max)) & (l >= out["prev_close"].combine(l, min))).astype(np.int8)
+        out["inside_bar"] = ((h <= g[self.config.high_col].shift(1)) & (l >= g[self.config.low_col].shift(1))).astype(np.int8)
         out["expansion_bar"] = (out["range"] > out["rolling_range_20"] * 1.5).astype(np.int8)
         out["small_body"] = (out["body_ratio"] < 0.25).astype(np.int8)
         out["large_body"] = (out["body_ratio"] > 0.75).astype(np.int8)
@@ -150,11 +150,25 @@ class FeatureFactory:
 
         # Cross-feature interactions
         out["body_x_volatility"] = out["body_ratio"] * out["volatility_20"].fillna(0.0)
-        out["wick_x_range"] = out["upper_wick_ratio"] * out["range_pct_20"] if "range_pct_20" in out.columns else out["upper_wick_ratio"] * self._safe_div(out["range"], out["rolling_range_20"])
+        out["wick_x_range"] = out["upper_wick_ratio"] * self._safe_div(out["range"], out["rolling_range_20"])
         out["momentum_x_range"] = out["momentum_3"].fillna(0.0) * out["range"]
         out["trend_x_volume"] = out["trend_20"].fillna(0.0) * out["volume_ratio_10"].fillna(0.0)
 
-        # Clean up
+        # Clean up only rows that are unusable for core candle fields.
         out = out.replace([np.inf, -np.inf], np.nan)
-        out = out.dropna().reset_index(drop=True)
+        out = out.dropna(subset=[
+            self.config.asset_col,
+            self.config.timeframe_col,
+            self.config.timestamp_col,
+            self.config.open_col,
+            self.config.high_col,
+            self.config.low_col,
+            self.config.close_col,
+            self.config.volume_col,
+        ]).reset_index(drop=True)
+
+        # Fill remaining feature NaNs after rolling calculations so rows are preserved.
+        numeric_cols = out.select_dtypes(include=[np.number]).columns
+        out[numeric_cols] = out[numeric_cols].fillna(0)
+
         return out
