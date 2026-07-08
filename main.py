@@ -33,9 +33,13 @@ def main() -> None:
         for hyp in generated:
             result = runner.evaluate(df, hyp)
             validation = validator.evaluate(winrate=result.winrate, occurrence=result.occurrence)
+
             exp = experiment_manager.create(
                 hypothesis=hyp.id,
-                parameters={"signature": hyp.signature, "conditions": [(c.feature, c.operator, c.value) for c in hyp.conditions]},
+                parameters={
+                    "signature": hyp.signature,
+                    "conditions": [(c.feature, c.operator, c.value) for c in hyp.conditions],
+                },
                 dataset="feature_frame",
             )
             exp.status = "PASS" if validation.passed else "REJECT"
@@ -43,6 +47,7 @@ def main() -> None:
             exp.validation_win = result.winrate
             exp.test_win = result.winrate
             experiment_manager.save(exp)
+
             if validation.passed:
                 accepted += 1
 
