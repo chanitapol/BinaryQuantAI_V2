@@ -12,18 +12,20 @@ import pandas as pd
 class FeatureEngineConfig:
     db_path: str | Path = "database/binary_quant.db"
     table_name: str = "candles"
-    symbol_col: str = "symbol"
+    asset_col: str = "asset"
+    timeframe_col: str = "timeframe"
     timestamp_col: str = "timestamp"
     open_col: str = "open"
     high_col: str = "high"
     low_col: str = "low"
     close_col: str = "close"
+    volume_col: str = "volume"
 
 
 class FeatureEngine:
-    """Load candles from SQLite and build a basic OHLC feature matrix."""
+    """Load candles from SQLite and build a feature matrix from OHLC data."""
 
-    REQUIRED_COLUMNS: tuple[str, ...] = ("symbol", "timestamp", "open", "high", "low", "close")
+    REQUIRED_COLUMNS: tuple[str, ...] = ("asset", "timeframe", "timestamp", "open", "high", "low", "close", "volume")
 
     def __init__(self, config: FeatureEngineConfig | None = None) -> None:
         self.config = config or FeatureEngineConfig()
@@ -41,10 +43,7 @@ class FeatureEngine:
 
     def load_candles(self, limit: int | None = None) -> pd.DataFrame:
         conn = self.connect()
-        sql = (
-            f"SELECT * FROM {self.config.table_name} "
-            f"ORDER BY {self.config.symbol_col}, {self.config.timestamp_col}"
-        )
+        sql = f"SELECT * FROM {self.config.table_name} ORDER BY {self.config.asset_col}, {self.config.timestamp_col}"
         if limit is not None:
             sql += f" LIMIT {int(limit)}"
         return pd.read_sql_query(sql, conn)
@@ -64,12 +63,19 @@ class FeatureEngine:
         self.validate_schema(df)
 
         out = df.copy()
-        out = out.sort_values([self.config.symbol_col, self.config.timestamp_col]).reset_index(drop=True)
+        out = out.sort_values([self.config.asset_col, self.config.timestamp_col]).reset_index(drop=True)
+
+        # Force numeric columns to numeric dtypes
+        for col in [self.config.timeframe_col, self.config.timestamp_col, self.config.open_col, self.config.high_col, self.config.low_col, self.config.close_col, self.config.volume_col]:
+            out[col] = pd.to_numeric(out[col], errors="coerce")
+
+        out = out.dropna(subset=[self.config.asset_col, self.config.timestamp_col, self.config.open_col, self.config.high_col, self.config.low_col, self.config.close_col])
 
         o = out[self.config.open_col].astype(float)
         h = out[self.config.high_col].astype(float)
         l = out[self.config.low_col].astype(float)
         c = out[self.config.close_col].astype(float)
+        v = out[self.config.volume_col].astype(float)
 
         out["body"] = c - o
         out["abs_body"] = out["body"].abs()
@@ -82,15 +88,17 @@ class FeatureEngine:
         out["close_pos_in_range"] = self._safe_div(c - l, out["range"])
         out["bull"] = (c > o).astype(np.int8)
         out["bear"] = (c < o).astype(np.int8)
+        out["volume_log"] = np.log1p(v.fillna(0.0))
 
-        group = out.groupby(self.config.symbol_col, sort=False)
+        group = out.groupby(self.config.asset_col, sort=False)
         out["prev_close"] = group[self.config.close_col].shift(1)
         out["prev_open"] = group[self.config.open_col].shift(1)
         out["prev_body"] = group["body"].shift(1)
         out["prev_range"] = group["range"].shift(1)
         out["return_1"] = self._safe_div(c - out["prev_close"], out["prev_close"])
         out["gap"] = o - out["prev_close"]
-        out["tr"] = pd.concat(
+
+        tr = pd.concat(
             [
                 out["range"],
                 (h - out["prev_close"]).abs(),
@@ -98,6 +106,7 @@ class FeatureEngine:
             ],
             axis=1,
         ).max(axis=1)
+        out["tr"] = tr
         out["atr_14"] = group["tr"].transform(lambda s: s.rolling(14, min_periods=1).mean())
         out["rolling_range_20"] = group["range"].transform(lambda s: s.rolling(20, min_periods=1).mean())
         out["rolling_abs_body_20"] = group["abs_body"].transform(lambda s: s.rolling(20, min_periods=1).mean())
@@ -109,8 +118,11 @@ class FeatureEngine:
         out["position_20"] = self._safe_div(c - out["rolling_low_20"], out["rolling_high_20"] - out["rolling_low_20"])
         out["wick_imbalance"] = out["upper_wick"] - out["lower_wick"]
         out["body_to_wick"] = self._safe_div(out["abs_body"], out[["upper_wick", "lower_wick"]].sum(axis=1))
+        out["range_pct_20"] = self._safe_div(out["range"], out["rolling_range_20"])
+        out["body_pct_20"] = self._safe_div(out["abs_body"], out["rolling_abs_body_20"])
 
-        out = out.replace([np.inf, -np.inf], np.nan).dropna().reset_index(drop=True)
+        out = out.replace([np.inf, -np.inf], np.nan)
+        out = out.dropna().reset_index(drop=True)
         return out
 
     def run(self, limit: int | None = None) -> pd.DataFrame:
