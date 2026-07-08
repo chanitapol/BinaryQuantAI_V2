@@ -2,6 +2,7 @@ from models.feature_engine import FeatureEngine
 from models.hypothesis_engine import HypothesisEngine
 from models.validation_engine import ValidationEngine
 from models.experiment_manager import ExperimentManager
+from models.experiment_runner import ExperimentRunner
 
 
 FEATURE_RULES = {
@@ -19,6 +20,7 @@ def main() -> None:
     experiment_manager = ExperimentManager()
     hypothesis_engine = HypothesisEngine()
     validator = ValidationEngine()
+    runner = ExperimentRunner(target_col="return_1")
 
     try:
         df = feature_engine.run()
@@ -27,19 +29,21 @@ def main() -> None:
         generated = list(hypothesis_engine.generate(FEATURE_RULES, max_features=3))
         print(f"Generated hypotheses: {len(generated):,}")
 
-        # Placeholder evaluation loop wired to the new pipeline.
-        # The next commit will replace this with real backtesting logic over feature slices.
         accepted = 0
-        for hyp in generated[:25]:
-            # Dummy pass-through metrics for now so the pipeline is wired end-to-end.
-            result = validator.evaluate(winrate=0.50, occurrence=1000)
-            exp = experiment_manager.create(hypothesis=hyp.id, parameters={"signature": hyp.signature}, dataset="feature_frame")
-            exp.status = "PASS" if result.passed else "REJECT"
+        for hyp in generated:
+            result = runner.evaluate(df, hyp)
+            validation = validator.evaluate(winrate=result.winrate, occurrence=result.occurrence)
+            exp = experiment_manager.create(
+                hypothesis=hyp.id,
+                parameters={"signature": hyp.signature, "conditions": [(c.feature, c.operator, c.value) for c in hyp.conditions]},
+                dataset="feature_frame",
+            )
+            exp.status = "PASS" if validation.passed else "REJECT"
             exp.train_win = result.winrate
             exp.validation_win = result.winrate
             exp.test_win = result.winrate
             experiment_manager.save(exp)
-            if result.passed:
+            if validation.passed:
                 accepted += 1
 
         print(f"Accepted hypotheses: {accepted}")
