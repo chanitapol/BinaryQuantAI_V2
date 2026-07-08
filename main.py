@@ -4,16 +4,7 @@ from models.validation_engine import ValidationEngine
 from models.experiment_manager import ExperimentManager
 from models.experiment_runner import ExperimentRunner
 from models.dataset_splitter import split_dataframe
-
-
-FEATURE_RULES = {
-    "body_ratio": (">", 0.6),
-    "upper_wick_ratio": (">", 0.2),
-    "lower_wick_ratio": (">", 0.2),
-    "close_pos_in_range": (">", 0.5),
-    "atr_14": (">", 0.0),
-    "momentum_3": (">", 0.0),
-}
+from models.ranking_engine import RankingEngine
 
 
 def main() -> None:
@@ -22,21 +13,26 @@ def main() -> None:
     hypothesis_engine = HypothesisEngine()
     validator = ValidationEngine()
     runner = ExperimentRunner()
+    ranking_engine = RankingEngine(payout=0.80)
 
     try:
         df = feature_engine.run()
-        print(f"Loaded and engineered features: {len(df):,} rows, {len(df.columns):,} columns")
+        print("=" * 70)
+        print("BinaryQuantAI V2")
+        print("=" * 70)
+        print(f"Rows      : {len(df):,}")
+        print(f"Features  : {len(df.columns):,}")
 
         split = split_dataframe(df, train_ratio=0.70, validation_ratio=0.15)
         print(
             f"Split -> train: {len(split.train):,}, validation: {len(split.validation):,}, test: {len(split.test):,}"
         )
 
-        generated = list(hypothesis_engine.generate(FEATURE_RULES, max_features=3))
-        print(f"Generated hypotheses: {len(generated):,}")
+        hypotheses = hypothesis_engine.generate_from_dataframe(df, max_features=2)
+        print(f"Generated hypotheses: {len(hypotheses):,}")
 
-        accepted = 0
-        for hyp in generated:
+        results = []
+        for hyp in hypotheses:
             train_result = runner.evaluate(split.train, hyp)
             validation_result = runner.evaluate(split.validation, hyp)
             test_result = runner.evaluate(split.test, hyp)
@@ -48,11 +44,20 @@ def main() -> None:
                 occurrence=validation_result.occurrence,
             )
 
+            score, expectancy, confidence, stability = ranking_engine.score(
+                train_winrate=train_result.winrate,
+                validation_winrate=validation_result.winrate,
+                test_winrate=test_result.winrate,
+                occurrence=validation_result.occurrence,
+                gap=validation.gap,
+            )
+
             exp = experiment_manager.create(
                 hypothesis=hyp.id,
                 parameters={
                     "signature": hyp.signature,
                     "conditions": [(c.feature, c.operator, c.value) for c in hyp.conditions],
+                    "direction": hyp.direction,
                 },
                 dataset="feature_frame",
             )
@@ -62,21 +67,40 @@ def main() -> None:
             exp.test_win = test_result.winrate
             experiment_manager.save(exp)
 
-            status = "PASS" if validation.passed else "REJECT"
-            print(
-                f"{hyp.id} | {status} | "
-                f"train={train_result.winrate:.4f} | "
-                f"val={validation_result.winrate:.4f} | "
-                f"test={test_result.winrate:.4f} | "
-                f"occ={validation_result.occurrence} | "
-                f"gap={validation.gap:.4f} | "
-                f"reason={validation.reason}"
+            results.append(
+                {
+                    "hypothesis_id": hyp.id,
+                    "train_winrate": train_result.winrate,
+                    "validation_winrate": validation_result.winrate,
+                    "test_winrate": test_result.winrate,
+                    "occurrence": validation_result.occurrence,
+                    "gap": validation.gap,
+                    "status": exp.status,
+                    "reason": validation.reason,
+                    "score": score,
+                    "expectancy": expectancy,
+                    "confidence": confidence,
+                    "stability": stability,
+                }
             )
 
-            if validation.passed:
-                accepted += 1
+        import pandas as pd
 
-        print(f"Accepted hypotheses: {accepted}")
+        results_df = pd.DataFrame(results)
+        ranked = ranking_engine.rank_rows(results_df)
+
+        accepted = int((ranked["status"] == "PASS").sum())
+        print(f"Accepted hypotheses: {accepted}/{len(ranked)}")
+
+        print("\nTop 20 hypotheses")
+        print("-" * 120)
+        for _, row in ranked.head(20).iterrows():
+            print(
+                f"{row['rank']:4d} | {row['hypothesis_id']} | {row['status']:7s} | "
+                f"score={row['score']:.4f} | win={row['validation_winrate']:.4f} | "
+                f"exp={row['expectancy']:.4f} | conf={row['confidence']:.4f} | "
+                f"stab={row['stability']:.4f} | occ={int(row['occurrence'])} | gap={row['gap']:.4f}"
+            )
     finally:
         feature_engine.close()
 
