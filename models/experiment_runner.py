@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable
 
-import numpy as np
 import pandas as pd
 
 from models.hypothesis_engine import Hypothesis, Condition
@@ -16,21 +14,23 @@ class ExperimentResult:
     winrate: float
     expectancy: float
     occurrence: int
+    wins: int
+    losses: int
 
 
 class ExperimentRunner:
-    """Evaluate hypotheses against a feature DataFrame.
+    """Evaluate hypotheses using binary-outcome logic.
 
-    The runner interprets each hypothesis as a conjunction of conditions.
-    For now the target is an exploratory proxy:
-    - BUY hypothesis scores rows where next return is positive
-    - SELL hypothesis scores rows where next return is negative
+    A row is treated as a trade setup. For BUY setups, the outcome is a win
+    when the next close is above the entry close. For SELL setups, the outcome
+    is a win when the next close is below the entry close.
 
-    This is an initial research runner, not a live trading engine.
+    The current implementation uses the next candle as the expiry candle.
     """
 
-    def __init__(self, target_col: str = "return_1") -> None:
-        self.target_col = target_col
+    def __init__(self, close_col: str = "close", asset_col: str = "asset") -> None:
+        self.close_col = close_col
+        self.asset_col = asset_col
 
     @staticmethod
     def _mask_for_condition(df: pd.DataFrame, condition: Condition) -> pd.Series:
@@ -55,9 +55,14 @@ class ExperimentRunner:
             return series.between(low, high)
         raise ValueError(f"Unsupported operator: {op}")
 
+    def _build_next_close(self, df: pd.DataFrame) -> pd.Series:
+        if self.asset_col in df.columns and self.close_col in df.columns:
+            return df.groupby(self.asset_col, sort=False)[self.close_col].shift(-1)
+        return df[self.close_col].shift(-1)
+
     def evaluate(self, df: pd.DataFrame, hypothesis: Hypothesis) -> ExperimentResult:
-        if self.target_col not in df.columns:
-            raise ValueError(f"Target column '{self.target_col}' not found in dataframe")
+        if self.close_col not in df.columns:
+            raise ValueError(f"Close column '{self.close_col}' not found in dataframe")
 
         mask = pd.Series(True, index=df.index)
         for condition in hypothesis.conditions:
@@ -68,13 +73,24 @@ class ExperimentRunner:
         passed = df.loc[mask].copy()
         occurrence = int(len(passed))
         if occurrence == 0:
-            return ExperimentResult(hypothesis.id, 0, 0.0, 0.0, 0)
+            return ExperimentResult(hypothesis.id, 0, 0.0, 0.0, 0, 0, 0)
 
-        target = passed[self.target_col].astype(float)
-        if hypothesis.direction.upper() == "SELL":
-            target = -target
+        next_close = self._build_next_close(passed)
+        entry_close = passed[self.close_col].astype(float)
+        direction = hypothesis.direction.upper()
 
-        wins = (target > 0).sum()
+        if direction == "SELL":
+            diff = entry_close - next_close.astype(float)
+        else:
+            diff = next_close.astype(float) - entry_close
+
+        diff = diff.dropna()
+        occurrence = int(len(diff))
+        if occurrence == 0:
+            return ExperimentResult(hypothesis.id, 0, 0.0, 0.0, 0, 0, 0)
+
+        wins = int((diff > 0).sum())
+        losses = int((diff <= 0).sum())
         winrate = float(wins / occurrence)
-        expectancy = float(target.mean())
-        return ExperimentResult(hypothesis.id, occurrence, winrate, expectancy, occurrence)
+        expectancy = float(diff.mean())
+        return ExperimentResult(hypothesis.id, occurrence, winrate, expectancy, occurrence, wins, losses)
