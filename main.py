@@ -42,7 +42,9 @@ def main() -> None:
             test_result = runner.evaluate(split.test, hyp)
 
             validation = validator.evaluate(
-                winrate=validation_result.winrate,
+                train_winrate=train_result.winrate,
+                validation_winrate=validation_result.winrate,
+                test_winrate=test_result.winrate,
                 occurrence=validation_result.occurrence,
             )
 
