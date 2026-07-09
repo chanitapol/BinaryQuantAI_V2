@@ -1,19 +1,25 @@
 from models.feature_engine import FeatureEngine
 from models.hypothesis_engine import HypothesisEngine
 from models.validation_engine import ValidationEngine
-from models.experiment_manager import ExperimentManager
 from models.experiment_runner import ExperimentRunner
 from models.dataset_splitter import split_dataframe
 from models.ranking_engine import RankingEngine
+from models.knowledge_engine import KnowledgeEngine
+
+import pandas as pd
+import time
 
 
 def main() -> None:
     feature_engine = FeatureEngine()
-    experiment_manager = ExperimentManager()
     hypothesis_engine = HypothesisEngine()
     validator = ValidationEngine()
     runner = ExperimentRunner()
     ranking_engine = RankingEngine(payout=0.80)
+    knowledge = KnowledgeEngine("research.db")
+
+    start = time.time()
+    run_id = 1
 
     try:
         df = feature_engine.run()
@@ -30,6 +36,9 @@ def main() -> None:
 
         hypotheses = hypothesis_engine.generate_from_dataframe(df, max_features=2)
         print(f"Generated hypotheses: {len(hypotheses):,}")
+
+        for hyp in hypotheses:
+            knowledge.add_hypothesis(hyp)
 
         results = []
         for hyp in hypotheses:
@@ -52,42 +61,36 @@ def main() -> None:
                 gap=validation.gap,
             )
 
-            exp = experiment_manager.create(
-                hypothesis=hyp.id,
-                parameters={
-                    "signature": hyp.signature,
-                    "conditions": [(c.feature, c.operator, c.value) for c in hyp.conditions],
-                    "direction": hyp.direction,
-                },
-                dataset="feature_frame",
-            )
-            exp.status = "PASS" if validation.passed else "REJECT"
-            exp.train_win = train_result.winrate
-            exp.validation_win = validation_result.winrate
-            exp.test_win = test_result.winrate
-            experiment_manager.save(exp)
-
-            results.append(
-                {
-                    "hypothesis_id": hyp.id,
-                    "train_winrate": train_result.winrate,
-                    "validation_winrate": validation_result.winrate,
-                    "test_winrate": test_result.winrate,
-                    "occurrence": validation_result.occurrence,
-                    "gap": validation.gap,
-                    "status": exp.status,
-                    "reason": validation.reason,
-                    "score": score,
-                    "expectancy": expectancy,
-                    "confidence": confidence,
-                    "stability": stability,
-                }
-            )
-
-        import pandas as pd
+            row = {
+                "run_id": run_id,
+                "hypothesis_id": hyp.id,
+                "train_winrate": train_result.winrate,
+                "validation_winrate": validation_result.winrate,
+                "test_winrate": test_result.winrate,
+                "occurrence": validation_result.occurrence,
+                "expectancy": expectancy,
+                "confidence": confidence,
+                "stability": stability,
+                "gap": validation.gap,
+                "score": score,
+                "status": "PASS" if validation.passed else "REJECT",
+                "runtime": 0.0,
+            }
+            results.append(row)
+            knowledge.add_experiment(row)
 
         results_df = pd.DataFrame(results)
         ranked = ranking_engine.rank_rows(results_df)
+
+        for _, row in ranked.iterrows():
+            knowledge.add_ranking(
+                run_id=run_id,
+                hypothesis_id=row["hypothesis_id"],
+                rank=int(row["rank"]),
+                score=float(row["score"]),
+            )
+
+        knowledge.flush()
 
         accepted = int((ranked["status"] == "PASS").sum())
         print(f"Accepted hypotheses: {accepted}/{len(ranked)}")
@@ -101,7 +104,10 @@ def main() -> None:
                 f"exp={row['expectancy']:.4f} | conf={row['confidence']:.4f} | "
                 f"stab={row['stability']:.4f} | occ={int(row['occurrence'])} | gap={row['gap']:.4f}"
             )
+
+        print(f"\nRuntime : {time.time() - start:.2f} sec")
     finally:
+        knowledge.close()
         feature_engine.close()
 
 
