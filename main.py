@@ -19,8 +19,7 @@ def main() -> None:
     runner = ExperimentRunner()
     ranking_engine = RankingEngine(payout=0.80)
     knowledge = KnowledgeEngine("research.db")
-    stats = StatisticsEngine("research.db")
-    evolution = EvolutionEngine("research.db")
+
 
     start = time.time()
     run_id = 1
@@ -56,6 +55,16 @@ def main() -> None:
                 test_winrate=test_result.winrate,
                 occurrence=validation_result.occurrence,
             )
+
+                if validation.passed:
+                    print(
+                        hyp.id,
+                        train_result.winrate,
+                        validation_result.winrate,
+                        test_result.winrate,
+                        validation_result.occurrence,
+                    )
+                    break
 
             score, expectancy, confidence, stability = ranking_engine.score(
                 train_winrate=train_result.winrate,
@@ -95,6 +104,9 @@ def main() -> None:
             )
 
         knowledge.flush()
+
+        stats = StatisticsEngine("research.db")
+        evolution = EvolutionEngine("research.db")
 
         accepted = int((ranked["status"] == "PASS").sum())
         print(f"Accepted hypotheses: {accepted}/{len(ranked)}")
