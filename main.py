@@ -5,6 +5,8 @@ from models.experiment_runner import ExperimentRunner
 from models.dataset_splitter import split_dataframe
 from models.ranking_engine import RankingEngine
 from models.knowledge_engine import KnowledgeEngine
+from models.statistics_engine import StatisticsEngine
+from models.evolution_engine import EvolutionEngine
 
 import pandas as pd
 import time
@@ -17,6 +19,8 @@ def main() -> None:
     runner = ExperimentRunner()
     ranking_engine = RankingEngine(payout=0.80)
     knowledge = KnowledgeEngine("research.db")
+    stats = StatisticsEngine("research.db")
+    evolution = EvolutionEngine("research.db")
 
     start = time.time()
     run_id = 1
@@ -105,8 +109,32 @@ def main() -> None:
                 f"stab={row['stability']:.4f} | occ={int(row['occurrence'])} | gap={row['gap']:.4f}"
             )
 
+        print("\nTop Features")
+        print("-" * 120)
+        top_features = stats.top_features(10)
+        if not top_features.empty:
+            print(top_features.to_string(index=False))
+        else:
+            print("No feature statistics yet.")
+
+        print("\nBest Thresholds")
+        print("-" * 120)
+        best_thresholds = stats.best_thresholds(10)
+        if not best_thresholds.empty:
+            print(best_thresholds.to_string(index=False))
+        else:
+            print("No threshold statistics yet.")
+
+        proposals = evolution.proposals_as_hypotheses(top_n=10)
+        print("\nEvolution Proposals")
+        print("-" * 120)
+        for p in proposals[:10]:
+            print(f"{p.id} | {p.direction} | {[(c.feature, c.operator, c.value) for c in p.conditions]} | {p.signature}")
+
         print(f"\nRuntime : {time.time() - start:.2f} sec")
     finally:
+        evolution.close()
+        stats.close()
         knowledge.close()
         feature_engine.close()
 
