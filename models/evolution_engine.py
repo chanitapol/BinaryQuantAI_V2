@@ -76,7 +76,18 @@ class EvolutionEngine:
         """
         score = float(row.get("score", 0.0))
         expectancy = float(row.get("expectancy", 0.0))
-        winrate = float(row.get("validation_winrate", row.get("winrate", 0.0)))
+        winrate = float(
+            row.get(
+                "validation_winrate",
+                row.get(
+                    "test_winrate",
+                    row.get(
+                        "winrate",
+                        row.get("train_winrate", 0.0),
+                    ),
+                ),
+            )
+        )
         occurrence = int(row.get("occurrence", 0))
         stability = float(row.get("stability", 0.0))
 
@@ -136,12 +147,23 @@ class EvolutionEngine:
         rankings = self.query.top_rankings(max(top_n * 2, top_n))
         if rankings.empty:
             return rankings
+
         rankings = rankings.copy()
         rankings["evolution_bias"] = rankings.apply(self._rank_bias, axis=1)
-        rankings = rankings.sort_values(
-            ["evolution_bias", "score", "validation_winrate", "occurrence"],
-            ascending=[False, False, False, False],
-        ).reset_index(drop=True)
+
+        sort_cols = ["evolution_bias"]
+        for col in (
+            "score",
+            "validation_winrate",
+            "test_winrate",
+            "winrate",
+            "occurrence",
+            "expectancy",
+        ):
+            if col in rankings.columns:
+                sort_cols.append(col)
+
+        rankings = rankings.sort_values(by=sort_cols, ascending=[False] * len(sort_cols)).reset_index(drop=True)
         return rankings.head(top_n)
 
     def evolve_from_rankings(self, top_n: int = 20) -> list[dict]:
@@ -153,7 +175,8 @@ class EvolutionEngine:
         if rankings.empty:
             return []
 
-        hypotheses = self.query.hypotheses(max(top_n * 2, top_n))
+        parent_ids = rankings["hypothesis_id"].astype(str).tolist()
+        hypotheses = self.query.hypotheses_by_ids(parent_ids)
         hyp_map = {str(row["id"]): row for _, row in hypotheses.iterrows()} if not hypotheses.empty else {}
 
         proposals: list[dict] = []
@@ -176,7 +199,6 @@ class EvolutionEngine:
             if not conditions:
                 continue
 
-            # mutation: keep the strongest few conditions and nudge numeric thresholds.
             mutated_conditions: list[dict[str, Any]] = []
             for c in conditions[:2]:
                 value = self._to_float(c.value)
@@ -201,7 +223,6 @@ class EvolutionEngine:
                         }
                     )
 
-            # crossover: combine first two conditions if possible.
             crossover_conditions: list[dict[str, Any]] = []
             if len(conditions) >= 2:
                 a, b = conditions[0], conditions[1]
@@ -229,10 +250,9 @@ class EvolutionEngine:
                 }
             )
 
-        # Add a few direct crossover proposals from the best parents.
         parent_ids = self._best_parent_ids(top_n)
-        if len(parent_ids) >= 2:
-            parent_rows = {str(row["id"]): row for _, row in hypotheses.iterrows()} if not hypotheses.empty else {}
+        if len(parent_ids) >= 2 and not hypotheses.empty:
+            parent_rows = {str(row["id"]): row for _, row in hypotheses.iterrows()}
             for i in range(0, len(parent_ids) - 1, 2):
                 p1 = parent_rows.get(parent_ids[i])
                 p2 = parent_rows.get(parent_ids[i + 1])
