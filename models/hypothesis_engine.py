@@ -53,7 +53,7 @@ class HypothesisEngine:
         self,
         max_features: int = 25,
         mutation_steps: int = 2,
-        quantiles: tuple[float, ...] = (0.2, 0.4, 0.6, 0.8),
+        quantiles: tuple[float, ...] = (0.2, 0.3, 0.4, 0.6, 0.7, 0.8),
         research_db: str = "research.db",
         top_feature_limit: int = 18,
         top_threshold_limit: int = 5,
@@ -166,17 +166,24 @@ class HypothesisEngine:
         if len(s) == 0:
             return []
 
-        q = s.quantile(list(self.quantiles))
-        values: list[tuple[str, object]] = [
-            (">", float(q.loc[0.6])),
-            (">", float(q.loc[0.7])),
-            (">", float(q.loc[0.8])),
-            ("<", float(q.loc[0.4])),
-            ("<", float(q.loc[0.3])),
-            ("<", float(q.loc[0.2])),
-            ("between", (float(q.loc[0.4]), float(q.loc[0.6]))),
+        q20 = float(s.quantile(0.20))
+        q30 = float(s.quantile(0.30))
+        q40 = float(s.quantile(0.40))
+        q60 = float(s.quantile(0.60))
+        q70 = float(s.quantile(0.70))
+        q80 = float(s.quantile(0.80))
+
+        return [
+            (">", q60),
+            (">", q70),
+            (">", q80),
+
+            ("<", q40),
+            ("<", q30),
+            ("<", q20),
+  
+            ("between", (q40, q60)),
         ]
-        return values
 
     def _thresholds_for_feature(
         self,
