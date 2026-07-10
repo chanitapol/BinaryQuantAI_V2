@@ -71,6 +71,18 @@ class KnowledgeQuery:
             (limit,),
         )
 
+    def hypotheses_by_ids(self, ids: list[str]) -> pd.DataFrame:
+        if not ids:
+            return pd.DataFrame()
+
+        placeholders = ",".join("?" for _ in ids)
+        sql = f"""
+            SELECT id, signature, direction, conditions, feature_count, created_at
+            FROM hypotheses
+            WHERE id IN ({placeholders})
+        """
+        return self._read(sql, tuple(ids))
+
     def experiments(self, limit: int = 20) -> pd.DataFrame:
         return self._read(
             """
