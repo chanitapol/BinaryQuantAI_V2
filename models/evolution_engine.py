@@ -25,6 +25,9 @@ class EvolutionCandidate:
 class EvolutionEngine:
     """Generate next-generation hypotheses from research.db statistics."""
 
+    MIN_PARENT_OCCURRENCE = 50
+    MIN_PARENT_EXP = -0.05
+
     def __init__(self, db_path: str = "research.db") -> None:
         self.db_path = Path(db_path)
         self.query = KnowledgeQuery(db_path)
@@ -60,7 +63,6 @@ class EvolutionEngine:
         return isinstance(value, (int, float))
 
     def _merge_same_feature(self, left: Condition, right: Condition) -> Condition:
-        """Collapse repeated conditions on the same feature."""
         feature = left.feature
         op1, op2 = left.operator, right.operator
         v1, v2 = self._to_float(left.value), self._to_float(right.value)
@@ -137,10 +139,30 @@ class EvolutionEngine:
                         return Condition(cond.feature, "between", (new_low, new_high))
         return Condition(cond.feature, cond.operator, value)
 
-    def _make_child_conditions(self, conditions: list[Condition]) -> list[Condition]:
+    def _add_new_feature(self, conditions: list[Condition], candidate_features: list[str]) -> list[Condition]:
+        existing = {c.feature for c in conditions}
+        for feat in candidate_features:
+            if feat in existing:
+                continue
+            # add one new feature from the best thresholds as a structural mutation
+            thresholds = self.best_thresholds(10)
+            row = thresholds[thresholds["feature"] == feat].head(1)
+            if row.empty:
+                continue
+            r = row.iloc[0]
+            op = str(r.get("operator", ">"))
+            value = self._normalize_threshold(r.get("threshold"))
+            conditions.append(Condition(feat, op, value))
+            break
+        return self._simplify_conditions(conditions)
+
+    def _make_child_conditions(self, conditions: list[Condition], candidate_features: list[str]) -> list[Condition]:
         simplified = self._simplify_conditions(conditions)
         mutated = [self._mutate_condition(c) for c in simplified[:2]]
-        return self._simplify_conditions(mutated)
+        child = self._simplify_conditions(mutated)
+        if len(child) < 2:
+            child = self._add_new_feature(child, candidate_features)
+        return child
 
     def best_features(self, limit: int = 10) -> pd.DataFrame:
         return self.query.top_features(limit)
@@ -192,6 +214,10 @@ class EvolutionEngine:
             return []
         scores: list[tuple[str, float]] = []
         for _, row in rankings.iterrows():
+            occ = int(row.get("occurrence", 0))
+            exp = float(row.get("expectancy", 0.0))
+            if occ < self.MIN_PARENT_OCCURRENCE or exp < self.MIN_PARENT_EXP:
+                continue
             hid = str(row.get("hypothesis_id"))
             scores.append((hid, self._rank_bias(row)))
         scores.sort(key=lambda x: x[1], reverse=True)
@@ -228,6 +254,9 @@ class EvolutionEngine:
         hypotheses = self.query.hypotheses_by_ids(parent_ids)
         hyp_map = {str(row["id"]): row for _, row in hypotheses.iterrows()} if not hypotheses.empty else {}
 
+        thresholds = self.best_thresholds(50)
+        candidate_features = [str(x) for x in thresholds["feature"].dropna().astype(str).tolist()] if not thresholds.empty else []
+
         proposals: list[dict] = []
         for _, r in rankings.iterrows():
             hid = str(r["hypothesis_id"])
@@ -248,7 +277,7 @@ class EvolutionEngine:
             if not conditions:
                 continue
 
-            child_conditions = self._make_child_conditions(conditions)
+            child_conditions = self._make_child_conditions(conditions, candidate_features)
             if not child_conditions:
                 continue
 
@@ -290,6 +319,10 @@ class EvolutionEngine:
                 crossover = self._simplify_conditions([conds1[0], conds2[0]])
                 if not crossover:
                     continue
+
+                # Structural mutation: if the child is too small, inject one new feature from the threshold table.
+                if len(crossover) < 2 and candidate_features:
+                    crossover = self._add_new_feature(crossover, candidate_features)
 
                 proposals.append(
                     {
