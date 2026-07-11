@@ -139,9 +139,15 @@ class EvolutionEngine:
                         return Condition(cond.feature, "between", (new_low, new_high))
         return Condition(cond.feature, cond.operator, value)
 
+    def _best_thresholds_safe(self, limit: int = 20) -> pd.DataFrame:
+        try:
+            return self.query.best_thresholds(limit)
+        except Exception:
+            return pd.DataFrame()
+
     def _add_new_feature(self, conditions: list[Condition], candidate_features: list[str]) -> list[Condition]:
         existing = {c.feature for c in conditions}
-        thresholds = self._best_thresholds_safe(10)
+        thresholds = self._best_thresholds_safe(50)
         if thresholds.empty:
             return self._simplify_conditions(conditions)
 
@@ -164,16 +170,25 @@ class EvolutionEngine:
         child = self._simplify_conditions(mutated)
         if len(child) < 2:
             child = self._add_new_feature(child, candidate_features)
+        if len(child) < 2 and candidate_features:
+            # structural fallback: inject a second diverse feature directly
+            thresholds = self._best_thresholds_safe(50)
+            for feat in candidate_features:
+                if feat in {c.feature for c in child}:
+                    continue
+                row = thresholds[thresholds["feature"] == feat].head(1)
+                if row.empty:
+                    continue
+                r = row.iloc[0]
+                op = str(r.get("operator", ">"))
+                value = self._normalize_threshold(r.get("threshold"))
+                child.append(Condition(feat, op, value))
+                break
+            child = self._simplify_conditions(child)
         return child
 
     def best_features(self, limit: int = 10) -> pd.DataFrame:
         return self.query.top_features(limit)
-
-    def _best_thresholds_safe(self, limit: int = 20) -> pd.DataFrame:
-        try:
-            return self.query.best_thresholds(limit)
-        except Exception:
-            return pd.DataFrame()
 
     def best_thresholds(self, limit: int = 20) -> pd.DataFrame:
         return self._best_thresholds_safe(limit)
@@ -330,6 +345,8 @@ class EvolutionEngine:
 
                 if len(crossover) < 2 and candidate_features:
                     crossover = self._add_new_feature(crossover, candidate_features)
+                if len(crossover) < 2 and candidate_features:
+                    crossover = self._make_child_conditions(crossover, candidate_features)
 
                 proposals.append(
                     {
