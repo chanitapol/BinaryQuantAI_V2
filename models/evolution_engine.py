@@ -141,11 +141,13 @@ class EvolutionEngine:
 
     def _add_new_feature(self, conditions: list[Condition], candidate_features: list[str]) -> list[Condition]:
         existing = {c.feature for c in conditions}
+        thresholds = self._best_thresholds_safe(10)
+        if thresholds.empty:
+            return self._simplify_conditions(conditions)
+
         for feat in candidate_features:
             if feat in existing:
                 continue
-            # add one new feature from the best thresholds as a structural mutation
-            thresholds = self.best_thresholds(10)
             row = thresholds[thresholds["feature"] == feat].head(1)
             if row.empty:
                 continue
@@ -167,8 +169,14 @@ class EvolutionEngine:
     def best_features(self, limit: int = 10) -> pd.DataFrame:
         return self.query.top_features(limit)
 
+    def _best_thresholds_safe(self, limit: int = 20) -> pd.DataFrame:
+        try:
+            return self.query.best_thresholds(limit)
+        except Exception:
+            return pd.DataFrame()
+
     def best_thresholds(self, limit: int = 20) -> pd.DataFrame:
-        return self.query.best_thresholds(limit)
+        return self._best_thresholds_safe(limit)
 
     def _rank_bias(self, row: pd.Series) -> float:
         score = float(row.get("score", 0.0))
@@ -254,7 +262,7 @@ class EvolutionEngine:
         hypotheses = self.query.hypotheses_by_ids(parent_ids)
         hyp_map = {str(row["id"]): row for _, row in hypotheses.iterrows()} if not hypotheses.empty else {}
 
-        thresholds = self.best_thresholds(50)
+        thresholds = self._best_thresholds_safe(50)
         candidate_features = [str(x) for x in thresholds["feature"].dropna().astype(str).tolist()] if not thresholds.empty else []
 
         proposals: list[dict] = []
@@ -320,7 +328,6 @@ class EvolutionEngine:
                 if not crossover:
                     continue
 
-                # Structural mutation: if the child is too small, inject one new feature from the threshold table.
                 if len(crossover) < 2 and candidate_features:
                     crossover = self._add_new_feature(crossover, candidate_features)
 
