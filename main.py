@@ -19,7 +19,8 @@ def main() -> None:
     runner = ExperimentRunner()
     ranking_engine = RankingEngine(payout=0.80)
     knowledge = KnowledgeEngine("research.db")
-
+    stats = None
+    evolution = None
 
     start = time.time()
     run_id = 1
@@ -56,15 +57,14 @@ def main() -> None:
                 occurrence=validation_result.occurrence,
             )
 
-                if validation.passed:
-                    print(
-                        hyp.id,
-                        train_result.winrate,
-                        validation_result.winrate,
-                        test_result.winrate,
-                        validation_result.occurrence,
-                    )
-                    break
+            if validation.passed:
+                print(
+                    hyp.id,
+                    train_result.winrate,
+                    validation_result.winrate,
+                    test_result.winrate,
+                    validation_result.occurrence,
+                )
 
             score, expectancy, confidence, stability = ranking_engine.score(
                 train_winrate=train_result.winrate,
@@ -145,8 +145,10 @@ def main() -> None:
 
         print(f"\nRuntime : {time.time() - start:.2f} sec")
     finally:
-        evolution.close()
-        stats.close()
+        if evolution is not None:
+            evolution.close()
+        if stats is not None:
+            stats.close()
         knowledge.close()
         feature_engine.close()
 
