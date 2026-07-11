@@ -27,6 +27,7 @@ class EvolutionEngine:
 
     MIN_PARENT_OCCURRENCE = 50
     MIN_PARENT_EXP = -0.05
+    MIN_THRESHOLD_TOTAL = 50
 
     def __init__(self, db_path: str = "research.db") -> None:
         self.db_path = Path(db_path)
@@ -141,7 +142,12 @@ class EvolutionEngine:
 
     def _best_thresholds_safe(self, limit: int = 20) -> pd.DataFrame:
         try:
-            return self.query.best_thresholds(limit)
+            df = self.query.best_thresholds(limit)
+            if df is None or df.empty:
+                return pd.DataFrame()
+            if "total" in df.columns:
+                df = df[df["total"].fillna(0).astype(int) >= self.MIN_THRESHOLD_TOTAL]
+            return df.reset_index(drop=True)
         except Exception:
             return pd.DataFrame()
 
@@ -171,7 +177,6 @@ class EvolutionEngine:
         if len(child) < 2:
             child = self._add_new_feature(child, candidate_features)
         if len(child) < 2 and candidate_features:
-            # structural fallback: inject a second diverse feature directly
             thresholds = self._best_thresholds_safe(50)
             for feat in candidate_features:
                 if feat in {c.feature for c in child}:
