@@ -23,14 +23,7 @@ class EvolutionCandidate:
 
 
 class EvolutionEngine:
-    """Generate next-generation hypotheses from research.db statistics.
-
-    V2 strategy:
-    - Prefer high-value parent hypotheses from rankings.
-    - Use best feature/threshold statistics as mutation seeds.
-    - Apply threshold mutation and simple crossover on top parents.
-    - Keep generation lightweight and deterministic enough for research runs.
-    """
+    """Generate next-generation hypotheses from research.db statistics."""
 
     def __init__(self, db_path: str = "research.db") -> None:
         self.db_path = Path(db_path)
@@ -62,6 +55,93 @@ class EvolutionEngine:
         except Exception:
             return value
 
+    @staticmethod
+    def _is_number(value: object) -> bool:
+        return isinstance(value, (int, float))
+
+    def _merge_same_feature(self, left: Condition, right: Condition) -> Condition:
+        """Collapse repeated conditions on the same feature."""
+        feature = left.feature
+        op1, op2 = left.operator, right.operator
+        v1, v2 = self._to_float(left.value), self._to_float(right.value)
+
+        if op1 == op2:
+            if op1 == ">" and self._is_number(v1) and self._is_number(v2):
+                return Condition(feature, ">", max(float(v1), float(v2)))
+            if op1 == "<" and self._is_number(v1) and self._is_number(v2):
+                return Condition(feature, "<", min(float(v1), float(v2)))
+            if op1 == "between":
+                a1, b1 = v1 if isinstance(v1, tuple) and len(v1) == 2 else (None, None)
+                a2, b2 = v2 if isinstance(v2, tuple) and len(v2) == 2 else (None, None)
+                if self._is_number(a1) and self._is_number(b1) and self._is_number(a2) and self._is_number(b2):
+                    low = max(float(a1), float(a2))
+                    high = min(float(b1), float(b2))
+                    if low < high:
+                        return Condition(feature, "between", (low, high))
+            return right
+
+        if op1 == "between":
+            low, high = v1 if isinstance(v1, tuple) and len(v1) == 2 else (None, None)
+            if op2 == ">" and self._is_number(low) and self._is_number(v2):
+                low = max(float(low), float(v2))
+            elif op2 == "<" and self._is_number(high) and self._is_number(v2):
+                high = min(float(high), float(v2))
+            if self._is_number(low) and self._is_number(high) and float(low) < float(high):
+                return Condition(feature, "between", (float(low), float(high)))
+            return left
+
+        if op2 == "between":
+            low, high = v2 if isinstance(v2, tuple) and len(v2) == 2 else (None, None)
+            if op1 == ">" and self._is_number(low) and self._is_number(v1):
+                low = max(float(low), float(v1))
+            elif op1 == "<" and self._is_number(high) and self._is_number(v1):
+                high = min(float(high), float(v1))
+            if self._is_number(low) and self._is_number(high) and float(low) < float(high):
+                return Condition(feature, "between", (float(low), float(high)))
+            return right
+
+        if {op1, op2} == {">", "<"} and self._is_number(v1) and self._is_number(v2):
+            low = min(float(v1), float(v2))
+            high = max(float(v1), float(v2))
+            if low < high:
+                return Condition(feature, "between", (low, high))
+
+        return right
+
+    def _simplify_conditions(self, conditions: list[Condition]) -> list[Condition]:
+        by_feature: dict[str, Condition] = {}
+        for cond in conditions:
+            if not cond.feature or not cond.operator:
+                continue
+            existing = by_feature.get(cond.feature)
+            by_feature[cond.feature] = cond if existing is None else self._merge_same_feature(existing, cond)
+        return [by_feature[k] for k in sorted(by_feature)]
+
+    def _mutate_condition(self, cond: Condition) -> Condition:
+        value = self._to_float(cond.value)
+        if cond.operator == ">" and self._is_number(value):
+            v = float(value)
+            return Condition(cond.feature, ">", v * 1.03 if v != 0 else 0.001)
+        if cond.operator == "<" and self._is_number(value):
+            v = float(value)
+            return Condition(cond.feature, "<", v * 0.97 if v != 0 else -0.001)
+        if cond.operator == "between" and isinstance(value, tuple) and len(value) == 2:
+            low, high = value
+            if self._is_number(low) and self._is_number(high):
+                low_f, high_f = float(low), float(high)
+                width = high_f - low_f
+                if width > 0:
+                    pad = width * 0.10
+                    new_low, new_high = low_f + pad, high_f - pad
+                    if new_low < new_high:
+                        return Condition(cond.feature, "between", (new_low, new_high))
+        return Condition(cond.feature, cond.operator, value)
+
+    def _make_child_conditions(self, conditions: list[Condition]) -> list[Condition]:
+        simplified = self._simplify_conditions(conditions)
+        mutated = [self._mutate_condition(c) for c in simplified[:2]]
+        return self._simplify_conditions(mutated)
+
     def best_features(self, limit: int = 10) -> pd.DataFrame:
         return self.query.top_features(limit)
 
@@ -69,11 +149,6 @@ class EvolutionEngine:
         return self.query.best_thresholds(limit)
 
     def _rank_bias(self, row: pd.Series) -> float:
-        """Bias score toward expectancy while preserving useful winners.
-
-        This is separate from ranking_engine.score() so Evolution can prioritize
-        promising parents even when the score distribution is negative.
-        """
         score = float(row.get("score", 0.0))
         expectancy = float(row.get("expectancy", 0.0))
         winrate = float(
@@ -81,24 +156,14 @@ class EvolutionEngine:
                 "validation_winrate",
                 row.get(
                     "test_winrate",
-                    row.get(
-                        "winrate",
-                        row.get("train_winrate", 0.0),
-                    ),
+                    row.get("winrate", row.get("train_winrate", 0.0)),
                 ),
             )
         )
         occurrence = int(row.get("occurrence", 0))
         stability = float(row.get("stability", 0.0))
-
         occ_term = min(1.0, sqrt(max(occurrence, 0)) / 100.0) if occurrence > 0 else 0.0
-        return (
-            0.40 * expectancy
-            + 0.20 * winrate
-            + 0.15 * stability
-            + 0.15 * occ_term
-            + 0.10 * score
-        )
+        return 0.40 * expectancy + 0.20 * winrate + 0.15 * stability + 0.15 * occ_term + 0.10 * score
 
     def seed_candidates(self, limit: int = 20) -> list[EvolutionCandidate]:
         thresholds = self.best_thresholds(limit)
@@ -125,15 +190,13 @@ class EvolutionEngine:
         rankings = self.query.top_rankings(max(top_n * 2, top_n))
         if rankings.empty:
             return []
-
         scores: list[tuple[str, float]] = []
         for _, row in rankings.iterrows():
             hid = str(row.get("hypothesis_id"))
             scores.append((hid, self._rank_bias(row)))
-
         scores.sort(key=lambda x: x[1], reverse=True)
-        seen: set[str] = set()
         parent_ids: list[str] = []
+        seen: set[str] = set()
         for hid, _ in scores:
             if hid in seen:
                 continue
@@ -147,30 +210,16 @@ class EvolutionEngine:
         rankings = self.query.top_rankings(max(top_n * 2, top_n))
         if rankings.empty:
             return rankings
-
         rankings = rankings.copy()
         rankings["evolution_bias"] = rankings.apply(self._rank_bias, axis=1)
-
         sort_cols = ["evolution_bias"]
-        for col in (
-            "score",
-            "validation_winrate",
-            "test_winrate",
-            "winrate",
-            "occurrence",
-            "expectancy",
-        ):
+        for col in ("score", "validation_winrate", "test_winrate", "winrate", "occurrence", "expectancy"):
             if col in rankings.columns:
                 sort_cols.append(col)
-
         rankings = rankings.sort_values(by=sort_cols, ascending=[False] * len(sort_cols)).reset_index(drop=True)
         return rankings.head(top_n)
 
     def evolve_from_rankings(self, top_n: int = 20) -> list[dict]:
-        """Build next-generation proposals from top ranked hypotheses.
-
-        Returns proposal dicts that can be converted into Hypothesis objects.
-        """
         rankings = self._best_hypothesis_rows(top_n)
         if rankings.empty:
             return []
@@ -199,51 +248,17 @@ class EvolutionEngine:
             if not conditions:
                 continue
 
-            mutated_conditions: list[dict[str, Any]] = []
-            for c in conditions[:2]:
-                value = self._to_float(c.value)
-                if isinstance(value, (int, float)):
-                    delta = abs(float(value)) * 0.03
-                    if delta == 0:
-                        delta = 0.001
-                    for offset in (-2, -1, 0, 1, 2):
-                        mutated_conditions.append(
-                            {
-                                "feature": c.feature,
-                                "operator": c.operator,
-                                "value": float(value) + (offset * delta),
-                            }
-                        )
-                else:
-                    mutated_conditions.append(
-                        {
-                            "feature": c.feature,
-                            "operator": c.operator,
-                            "value": value,
-                        }
-                    )
-
-            crossover_conditions: list[dict[str, Any]] = []
-            if len(conditions) >= 2:
-                a, b = conditions[0], conditions[1]
-                crossover_conditions = [
-                    {
-                        "feature": a.feature,
-                        "operator": a.operator,
-                        "value": self._to_float(a.value),
-                    },
-                    {
-                        "feature": b.feature,
-                        "operator": b.operator,
-                        "value": self._to_float(b.value),
-                    },
-                ]
+            child_conditions = self._make_child_conditions(conditions)
+            if not child_conditions:
+                continue
 
             proposals.append(
                 {
                     "parent_id": hid,
                     "direction": hrow.get("direction", "AUTO"),
-                    "conditions": mutated_conditions[:6] if mutated_conditions else crossover_conditions,
+                    "conditions": [
+                        {"feature": c.feature, "operator": c.operator, "value": c.value} for c in child_conditions
+                    ],
                     "source_score": float(r.get("score", 0.0)),
                     "evolution_bias": float(r.get("evolution_bias", 0.0)),
                     "reason": "top_rank_mutation",
@@ -259,50 +274,30 @@ class EvolutionEngine:
                 if p1 is None or p2 is None:
                     continue
 
-                conds1 = [
-                    Condition(
-                        feature=c.get("feature"),
-                        operator=c.get("operator"),
-                        value=c.get("value"),
-                    )
+                conds1 = self._simplify_conditions([
+                    Condition(c.get("feature"), c.get("operator"), c.get("value"))
                     for c in self._safe_json_loads(p1.get("conditions"))
                     if c.get("feature") is not None and c.get("operator") is not None
-                ]
-                conds2 = [
-                    Condition(
-                        feature=c.get("feature"),
-                        operator=c.get("operator"),
-                        value=c.get("value"),
-                    )
+                ])
+                conds2 = self._simplify_conditions([
+                    Condition(c.get("feature"), c.get("operator"), c.get("value"))
                     for c in self._safe_json_loads(p2.get("conditions"))
                     if c.get("feature") is not None and c.get("operator") is not None
-                ]
+                ])
                 if not conds1 or not conds2:
                     continue
 
-                crossover = []
-                crossover.extend(
-                    {
-                        "feature": c.feature,
-                        "operator": c.operator,
-                        "value": self._to_float(c.value),
-                    }
-                    for c in conds1[:1]
-                )
-                crossover.extend(
-                    {
-                        "feature": c.feature,
-                        "operator": c.operator,
-                        "value": self._to_float(c.value),
-                    }
-                    for c in conds2[:1]
-                )
+                crossover = self._simplify_conditions([conds1[0], conds2[0]])
+                if not crossover:
+                    continue
 
                 proposals.append(
                     {
                         "parent_id": f"{parent_ids[i]}|{parent_ids[i + 1]}",
                         "direction": p1.get("direction", "AUTO"),
-                        "conditions": crossover,
+                        "conditions": [
+                            {"feature": c.feature, "operator": c.operator, "value": c.value} for c in crossover
+                        ],
                         "source_score": float(p1.get("score", 0.0)) + float(p2.get("score", 0.0)),
                         "evolution_bias": float(p1.get("evolution_bias", 0.0)) + float(p2.get("evolution_bias", 0.0)),
                         "reason": "top_rank_crossover",
@@ -314,11 +309,16 @@ class EvolutionEngine:
     def proposals_as_hypotheses(self, top_n: int = 20) -> list[Hypothesis]:
         proposals = self.evolve_from_rankings(top_n)
         out: list[Hypothesis] = []
-        idx = 1
         seen: set[str] = set()
+        idx = 1
 
         for p in proposals:
-            conds = [Condition(**c) for c in p["conditions"] if c.get("feature") is not None and c.get("operator") is not None]
+            conds = [
+                Condition(**c)
+                for c in p["conditions"]
+                if c.get("feature") is not None and c.get("operator") is not None
+            ]
+            conds = self._simplify_conditions(conds)
             if not conds:
                 continue
             sig = f"{p['direction']}|{[(c.feature, c.operator, c.value) for c in conds]}"
@@ -334,4 +334,5 @@ class EvolutionEngine:
                 )
             )
             idx += 1
+
         return out
