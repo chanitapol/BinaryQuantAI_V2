@@ -40,9 +40,18 @@ class EvolutionEngine:
     def _normalize_threshold(value: object) -> object:
         if isinstance(value, str):
             try:
-                return float(value)
+                parsed = json.loads(value)
+                if isinstance(parsed, list) and len(parsed) == 2:
+                    return tuple(parsed)
+                if isinstance(parsed, (int, float)):
+                    return float(parsed)
             except Exception:
-                return value
+                try:
+                    return float(value)
+                except Exception:
+                    return value
+        if isinstance(value, list) and len(value) == 2:
+            return tuple(value)
         return value
 
     @staticmethod
@@ -142,12 +151,12 @@ class EvolutionEngine:
 
     def _best_thresholds_safe(self, limit: int = 20) -> pd.DataFrame:
         try:
-            df = self.query.best_thresholds(limit)
+            df = self.query.best_thresholds(max(limit * 5, limit))
             if df is None or df.empty:
                 return pd.DataFrame()
             if "total" in df.columns:
                 df = df[df["total"].fillna(0).astype(int) >= self.MIN_THRESHOLD_TOTAL]
-            return df.reset_index(drop=True)
+            return df.head(limit).reset_index(drop=True)
         except Exception:
             return pd.DataFrame()
 
@@ -164,9 +173,7 @@ class EvolutionEngine:
             if row.empty:
                 continue
             r = row.iloc[0]
-            op = str(r.get("operator", ">"))
-            value = self._normalize_threshold(r.get("threshold"))
-            conditions.append(Condition(feat, op, value))
+            conditions.append(Condition(feat, str(r.get("operator", ">")), self._normalize_threshold(r.get("threshold"))))
             break
         return self._simplify_conditions(conditions)
 
@@ -176,20 +183,6 @@ class EvolutionEngine:
         child = self._simplify_conditions(mutated)
         if len(child) < 2:
             child = self._add_new_feature(child, candidate_features)
-        if len(child) < 2 and candidate_features:
-            thresholds = self._best_thresholds_safe(50)
-            for feat in candidate_features:
-                if feat in {c.feature for c in child}:
-                    continue
-                row = thresholds[thresholds["feature"] == feat].head(1)
-                if row.empty:
-                    continue
-                r = row.iloc[0]
-                op = str(r.get("operator", ">"))
-                value = self._normalize_threshold(r.get("threshold"))
-                child.append(Condition(feat, op, value))
-                break
-            child = self._simplify_conditions(child)
         return child
 
     def best_features(self, limit: int = 10) -> pd.DataFrame:
@@ -201,15 +194,7 @@ class EvolutionEngine:
     def _rank_bias(self, row: pd.Series) -> float:
         score = float(row.get("score", 0.0))
         expectancy = float(row.get("expectancy", 0.0))
-        winrate = float(
-            row.get(
-                "validation_winrate",
-                row.get(
-                    "test_winrate",
-                    row.get("winrate", row.get("train_winrate", 0.0)),
-                ),
-            )
-        )
+        winrate = float(row.get("validation_winrate", row.get("test_winrate", row.get("winrate", row.get("train_winrate", 0.0)))))
         occurrence = int(row.get("occurrence", 0))
         stability = float(row.get("stability", 0.0))
         occ_term = min(1.0, sqrt(max(occurrence, 0)) / 100.0) if occurrence > 0 else 0.0
@@ -224,59 +209,83 @@ class EvolutionEngine:
             value = self._normalize_threshold(row.get("threshold"))
             if feature is None or operator is None:
                 continue
-            candidates.append(
-                EvolutionCandidate(
-                    parent_id="",
-                    child_id=f"EV{i:06d}",
-                    feature=str(feature),
-                    operator=str(operator),
-                    value=value,
-                    reason="best_threshold",
-                )
-            )
+            candidates.append(EvolutionCandidate("", f"EV{i:06d}", str(feature), str(operator), value, "best_threshold"))
         return candidates
 
-    def _best_parent_ids(self, top_n: int = 20) -> list[str]:
-        rankings = self.query.top_rankings(max(top_n * 2, top_n))
-        if rankings.empty:
-            return []
-        scores: list[tuple[str, float]] = []
-        for _, row in rankings.iterrows():
-            occ = int(row.get("occurrence", 0))
-            exp = float(row.get("expectancy", 0.0))
-            if occ < self.MIN_PARENT_OCCURRENCE or exp < self.MIN_PARENT_EXP:
-                continue
-            hid = str(row.get("hypothesis_id"))
-            scores.append((hid, self._rank_bias(row)))
-        scores.sort(key=lambda x: x[1], reverse=True)
-        parent_ids: list[str] = []
-        seen: set[str] = set()
-        for hid, _ in scores:
-            if hid in seen:
-                continue
-            seen.add(hid)
-            parent_ids.append(hid)
-            if len(parent_ids) >= top_n:
-                break
-        return parent_ids
-
-    def _best_hypothesis_rows(self, top_n: int = 20) -> pd.DataFrame:
-        rankings = self.query.top_rankings(max(top_n * 2, top_n))
+    def _eligible_rankings(self, top_n: int = 20) -> pd.DataFrame:
+        rankings = self.query.top_rankings(max(top_n * 10, 200))
+        if rankings is None or rankings.empty:
+            return pd.DataFrame()
+        rankings = rankings.copy()
+        if "occurrence" not in rankings.columns or "expectancy" not in rankings.columns:
+            return pd.DataFrame()
+        rankings["occurrence"] = pd.to_numeric(rankings["occurrence"], errors="coerce").fillna(0)
+        rankings["expectancy"] = pd.to_numeric(rankings["expectancy"], errors="coerce").fillna(float("-inf"))
+        rankings = rankings[
+            (rankings["occurrence"] >= self.MIN_PARENT_OCCURRENCE)
+            & (rankings["expectancy"] >= self.MIN_PARENT_EXP)
+        ].copy()
         if rankings.empty:
             return rankings
-        rankings = rankings.copy()
         rankings["evolution_bias"] = rankings.apply(self._rank_bias, axis=1)
         sort_cols = ["evolution_bias"]
         for col in ("score", "validation_winrate", "test_winrate", "winrate", "occurrence", "expectancy"):
             if col in rankings.columns:
                 sort_cols.append(col)
-        rankings = rankings.sort_values(by=sort_cols, ascending=[False] * len(sort_cols)).reset_index(drop=True)
-        return rankings.head(top_n)
+        return rankings.sort_values(by=sort_cols, ascending=[False] * len(sort_cols)).drop_duplicates("hypothesis_id").head(top_n).reset_index(drop=True)
+
+    def _best_parent_ids(self, top_n: int = 20) -> list[str]:
+        rankings = self._eligible_rankings(top_n)
+        if rankings.empty:
+            return []
+        return rankings["hypothesis_id"].astype(str).tolist()
+
+    def _best_hypothesis_rows(self, top_n: int = 20) -> pd.DataFrame:
+        return self._eligible_rankings(top_n)
+
+    def _exploration_proposals(self, top_n: int = 20) -> list[dict]:
+        thresholds = self._best_thresholds_safe(max(top_n * 4, 40))
+        if thresholds.empty:
+            return []
+
+        rows: list[pd.Series] = []
+        seen_features: set[str] = set()
+        for _, row in thresholds.iterrows():
+            feature = str(row.get("feature", ""))
+            if not feature or feature in seen_features:
+                continue
+            seen_features.add(feature)
+            rows.append(row)
+
+        proposals: list[dict] = []
+        pair_index = 0
+        for i in range(len(rows)):
+            for j in range(i + 1, len(rows)):
+                r1, r2 = rows[i], rows[j]
+                conditions = self._simplify_conditions([
+                    Condition(str(r1["feature"]), str(r1.get("operator", ">")), self._normalize_threshold(r1.get("threshold"))),
+                    Condition(str(r2["feature"]), str(r2.get("operator", ">")), self._normalize_threshold(r2.get("threshold"))),
+                ])
+                if len(conditions) < 2:
+                    continue
+                pair_index += 1
+                for direction in ("BUY", "SELL"):
+                    proposals.append({
+                        "parent_id": "EXPLORATION",
+                        "direction": direction,
+                        "conditions": [{"feature": c.feature, "operator": c.operator, "value": c.value} for c in conditions],
+                        "source_score": 0.0,
+                        "evolution_bias": 0.0,
+                        "reason": "qualified_parent_unavailable_threshold_exploration",
+                    })
+                    if len(proposals) >= top_n:
+                        return proposals
+        return proposals
 
     def evolve_from_rankings(self, top_n: int = 20) -> list[dict]:
         rankings = self._best_hypothesis_rows(top_n)
         if rankings.empty:
-            return []
+            return self._exploration_proposals(top_n)
 
         parent_ids = rankings["hypothesis_id"].astype(str).tolist()
         hypotheses = self.query.hypotheses_by_ids(parent_ids)
@@ -291,38 +300,26 @@ class EvolutionEngine:
             hrow = hyp_map.get(hid)
             if hrow is None:
                 continue
-
             parsed = self._safe_json_loads(hrow.get("conditions"))
             conditions = [
-                Condition(
-                    feature=cond.get("feature"),
-                    operator=cond.get("operator"),
-                    value=cond.get("value"),
-                )
+                Condition(cond.get("feature"), cond.get("operator"), cond.get("value"))
                 for cond in parsed
                 if cond.get("feature") is not None and cond.get("operator") is not None
             ]
             if not conditions:
                 continue
-
             child_conditions = self._make_child_conditions(conditions, candidate_features)
             if not child_conditions:
                 continue
+            proposals.append({
+                "parent_id": hid,
+                "direction": hrow.get("direction", "AUTO"),
+                "conditions": [{"feature": c.feature, "operator": c.operator, "value": c.value} for c in child_conditions],
+                "source_score": float(r.get("score", 0.0)),
+                "evolution_bias": float(r.get("evolution_bias", 0.0)),
+                "reason": "qualified_parent_mutation",
+            })
 
-            proposals.append(
-                {
-                    "parent_id": hid,
-                    "direction": hrow.get("direction", "AUTO"),
-                    "conditions": [
-                        {"feature": c.feature, "operator": c.operator, "value": c.value} for c in child_conditions
-                    ],
-                    "source_score": float(r.get("score", 0.0)),
-                    "evolution_bias": float(r.get("evolution_bias", 0.0)),
-                    "reason": "top_rank_mutation",
-                }
-            )
-
-        parent_ids = self._best_parent_ids(top_n)
         if len(parent_ids) >= 2 and not hypotheses.empty:
             parent_rows = {str(row["id"]): row for _, row in hypotheses.iterrows()}
             for i in range(0, len(parent_ids) - 1, 2):
@@ -330,7 +327,6 @@ class EvolutionEngine:
                 p2 = parent_rows.get(parent_ids[i + 1])
                 if p1 is None or p2 is None:
                     continue
-
                 conds1 = self._simplify_conditions([
                     Condition(c.get("feature"), c.get("operator"), c.get("value"))
                     for c in self._safe_json_loads(p1.get("conditions"))
@@ -343,30 +339,21 @@ class EvolutionEngine:
                 ])
                 if not conds1 or not conds2:
                     continue
-
                 crossover = self._simplify_conditions([conds1[0], conds2[0]])
-                if not crossover:
-                    continue
-
                 if len(crossover) < 2 and candidate_features:
                     crossover = self._add_new_feature(crossover, candidate_features)
-                if len(crossover) < 2 and candidate_features:
-                    crossover = self._make_child_conditions(crossover, candidate_features)
+                if len(crossover) < 2:
+                    continue
+                proposals.append({
+                    "parent_id": f"{parent_ids[i]}|{parent_ids[i + 1]}",
+                    "direction": p1.get("direction", "AUTO"),
+                    "conditions": [{"feature": c.feature, "operator": c.operator, "value": c.value} for c in crossover],
+                    "source_score": 0.0,
+                    "evolution_bias": 0.0,
+                    "reason": "qualified_parent_crossover",
+                })
 
-                proposals.append(
-                    {
-                        "parent_id": f"{parent_ids[i]}|{parent_ids[i + 1]}",
-                        "direction": p1.get("direction", "AUTO"),
-                        "conditions": [
-                            {"feature": c.feature, "operator": c.operator, "value": c.value} for c in crossover
-                        ],
-                        "source_score": float(p1.get("score", 0.0)) + float(p2.get("score", 0.0)),
-                        "evolution_bias": float(p1.get("evolution_bias", 0.0)) + float(p2.get("evolution_bias", 0.0)),
-                        "reason": "top_rank_crossover",
-                    }
-                )
-
-        return proposals
+        return proposals[:top_n] if proposals else self._exploration_proposals(top_n)
 
     def proposals_as_hypotheses(self, top_n: int = 20) -> list[Hypothesis]:
         proposals = self.evolve_from_rankings(top_n)
@@ -387,14 +374,7 @@ class EvolutionEngine:
             if sig in seen:
                 continue
             seen.add(sig)
-            out.append(
-                Hypothesis(
-                    id=f"EVO{idx:06d}",
-                    direction=p["direction"],
-                    conditions=conds,
-                    signature=sig,
-                )
-            )
+            out.append(Hypothesis(id=f"EVO{idx:06d}", direction=p["direction"], conditions=conds, signature=sig))
             idx += 1
 
         return out
