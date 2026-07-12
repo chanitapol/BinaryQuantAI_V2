@@ -18,8 +18,6 @@ class KnowledgeEngine:
         self._create_indexes()
 
     def _create_tables(self):
-        # Create tables only. Do not create indexes on newly introduced columns here:
-        # an existing legacy table may not have those columns until migration runs.
         self.cur.executescript("""
         CREATE TABLE IF NOT EXISTS research_runs(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -78,18 +76,27 @@ class KnowledgeEngine:
     def _column_names(self, table: str) -> set[str]:
         return {str(row[1]) for row in self.cur.execute(f"PRAGMA table_info({table})").fetchall()}
 
+    def _table_exists(self, table: str) -> bool:
+        row = self.cur.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (table,),
+        ).fetchone()
+        return row is not None
+
+    def _ensure_column(self, table: str, column_sql: str, column_name: str) -> None:
+        if self._table_exists(table) and column_name not in self._column_names(table):
+            self.cur.execute(f"ALTER TABLE {table} ADD COLUMN {column_sql}")
+
     def _migrate_schema(self) -> None:
-        # CREATE TABLE IF NOT EXISTS never alters an existing legacy table.
-        # Add required columns first, then indexes are created separately.
-        if "generation" not in self._column_names("experiments"):
-            self.cur.execute("ALTER TABLE experiments ADD COLUMN generation INTEGER NOT NULL DEFAULT 0")
-        if "generation" not in self._column_names("rankings"):
-            self.cur.execute("ALTER TABLE rankings ADD COLUMN generation INTEGER NOT NULL DEFAULT 0")
+        self._ensure_column("experiments", "generation INTEGER NOT NULL DEFAULT 0", "generation")
+        self._ensure_column("rankings", "generation INTEGER NOT NULL DEFAULT 0", "generation")
         self.conn.commit()
 
     def _create_indexes(self) -> None:
-        self.cur.execute("CREATE INDEX IF NOT EXISTS idx_experiments_run_generation ON experiments(run_id, generation)")
-        self.cur.execute("CREATE INDEX IF NOT EXISTS idx_rankings_run_generation ON rankings(run_id, generation)")
+        if self._table_exists("experiments"):
+            self.cur.execute("CREATE INDEX IF NOT EXISTS idx_experiments_run_generation ON experiments(run_id, generation)")
+        if self._table_exists("rankings"):
+            self.cur.execute("CREATE INDEX IF NOT EXISTS idx_rankings_run_generation ON rankings(run_id, generation)")
         self.conn.commit()
 
     def start_run(self, rows: int | None = None, features: int | None = None, notes: str | None = None) -> int:
