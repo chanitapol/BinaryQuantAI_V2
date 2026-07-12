@@ -28,6 +28,7 @@ class EvolutionEngine:
     MIN_PARENT_OCCURRENCE = 50
     MIN_PARENT_EXP = -0.05
     MIN_THRESHOLD_TOTAL = 50
+    EXPLORATION_FALLBACK_LIMIT = 10
 
     def __init__(self, db_path: str = "research.db") -> None:
         self.db_path = Path(db_path)
@@ -149,20 +150,25 @@ class EvolutionEngine:
                         return Condition(cond.feature, "between", (new_low, new_high))
         return Condition(cond.feature, cond.operator, value)
 
-    def _best_thresholds_safe(self, limit: int = 20) -> pd.DataFrame:
+    def _best_thresholds_safe(self, limit: int = 20, require_evidence: bool = True) -> pd.DataFrame:
         try:
+            print(f"[Evolution] Loading thresholds (limit={limit}, require_evidence={require_evidence})")
             df = self.query.best_thresholds(max(limit * 5, limit))
             if df is None or df.empty:
+                print("[Evolution] No threshold rows returned")
                 return pd.DataFrame()
-            if "total" in df.columns:
+            if require_evidence and "total" in df.columns:
+                before = len(df)
                 df = df[df["total"].fillna(0).astype(int) >= self.MIN_THRESHOLD_TOTAL]
+                print(f"[Evolution] Thresholds after evidence filter: {len(df)}/{before}")
             return df.head(limit).reset_index(drop=True)
-        except Exception:
+        except Exception as exc:
+            print(f"[Evolution] Threshold load failed: {type(exc).__name__}: {exc}")
             return pd.DataFrame()
 
     def _add_new_feature(self, conditions: list[Condition], candidate_features: list[str]) -> list[Condition]:
         existing = {c.feature for c in conditions}
-        thresholds = self._best_thresholds_safe(50)
+        thresholds = self._best_thresholds_safe(50, require_evidence=False)
         if thresholds.empty:
             return self._simplify_conditions(conditions)
 
@@ -213,18 +219,23 @@ class EvolutionEngine:
         return candidates
 
     def _eligible_rankings(self, top_n: int = 20) -> pd.DataFrame:
+        print(f"[Evolution] Loading parent rankings (top_n={top_n})")
         rankings = self.query.top_rankings(max(top_n * 10, 200))
         if rankings is None or rankings.empty:
+            print("[Evolution] No rankings returned")
             return pd.DataFrame()
         rankings = rankings.copy()
         if "occurrence" not in rankings.columns or "expectancy" not in rankings.columns:
+            print("[Evolution] Rankings missing occurrence/expectancy columns")
             return pd.DataFrame()
         rankings["occurrence"] = pd.to_numeric(rankings["occurrence"], errors="coerce").fillna(0)
         rankings["expectancy"] = pd.to_numeric(rankings["expectancy"], errors="coerce").fillna(float("-inf"))
+        before = len(rankings)
         rankings = rankings[
             (rankings["occurrence"] >= self.MIN_PARENT_OCCURRENCE)
             & (rankings["expectancy"] >= self.MIN_PARENT_EXP)
         ].copy()
+        print(f"[Evolution] Parent rankings after evidence filter: {len(rankings)}/{before}")
         if rankings.empty:
             return rankings
         rankings["evolution_bias"] = rankings.apply(self._rank_bias, axis=1)
@@ -244,8 +255,10 @@ class EvolutionEngine:
         return self._eligible_rankings(top_n)
 
     def _exploration_proposals(self, top_n: int = 20) -> list[dict]:
-        thresholds = self._best_thresholds_safe(max(top_n * 4, 40))
+        print(f"[Evolution] Exploration fallback activated (top_n={top_n})")
+        thresholds = self._best_thresholds_safe(max(top_n * 4, 40), require_evidence=False)
         if thresholds.empty:
+            print("[Evolution] No thresholds available for exploration")
             return []
 
         rows: list[pd.Series] = []
@@ -258,7 +271,6 @@ class EvolutionEngine:
             rows.append(row)
 
         proposals: list[dict] = []
-        pair_index = 0
         for i in range(len(rows)):
             for j in range(i + 1, len(rows)):
                 r1, r2 = rows[i], rows[j]
@@ -268,7 +280,6 @@ class EvolutionEngine:
                 ])
                 if len(conditions) < 2:
                     continue
-                pair_index += 1
                 for direction in ("BUY", "SELL"):
                     proposals.append({
                         "parent_id": "EXPLORATION",
@@ -278,8 +289,10 @@ class EvolutionEngine:
                         "evolution_bias": 0.0,
                         "reason": "qualified_parent_unavailable_threshold_exploration",
                     })
-                    if len(proposals) >= top_n:
+                    if len(proposals) >= self.EXPLORATION_FALLBACK_LIMIT:
+                        print(f"[Evolution] Exploration proposals built: {len(proposals)}")
                         return proposals
+        print(f"[Evolution] Exploration proposals built: {len(proposals)}")
         return proposals
 
     def evolve_from_rankings(self, top_n: int = 20) -> list[dict]:
@@ -291,7 +304,7 @@ class EvolutionEngine:
         hypotheses = self.query.hypotheses_by_ids(parent_ids)
         hyp_map = {str(row["id"]): row for _, row in hypotheses.iterrows()} if not hypotheses.empty else {}
 
-        thresholds = self._best_thresholds_safe(50)
+        thresholds = self._best_thresholds_safe(50, require_evidence=False)
         candidate_features = [str(x) for x in thresholds["feature"].dropna().astype(str).tolist()] if not thresholds.empty else []
 
         proposals: list[dict] = []
@@ -319,6 +332,10 @@ class EvolutionEngine:
                 "evolution_bias": float(r.get("evolution_bias", 0.0)),
                 "reason": "qualified_parent_mutation",
             })
+
+        if not proposals:
+            print("[Evolution] No mutation proposals; falling back to exploration")
+            return self._exploration_proposals(top_n)
 
         if len(parent_ids) >= 2 and not hypotheses.empty:
             parent_rows = {str(row["id"]): row for _, row in hypotheses.iterrows()}
@@ -353,7 +370,7 @@ class EvolutionEngine:
                     "reason": "qualified_parent_crossover",
                 })
 
-        return proposals[:top_n] if proposals else self._exploration_proposals(top_n)
+        return proposals[:top_n]
 
     def proposals_as_hypotheses(self, top_n: int = 20) -> list[Hypothesis]:
         proposals = self.evolve_from_rankings(top_n)
