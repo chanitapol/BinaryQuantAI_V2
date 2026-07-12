@@ -86,6 +86,17 @@ def _evaluate_hypotheses(
     return ranked
 
 
+def _audit_report(df: pd.DataFrame, split) -> None:
+    print("\nAudit Report")
+    print("-" * 120)
+    print(f"Rows: {len(df):,}")
+    print(f"Features: {len(df.columns):,}")
+    print(f"Train/Validation/Test: {len(split.train):,} / {len(split.validation):,} / {len(split.test):,}")
+    print(f"Train overlap with validation: {len(set(split.train.index).intersection(set(split.validation.index))):,}")
+    print(f"Train overlap with test: {len(set(split.train.index).intersection(set(split.test.index))):,}")
+    print(f"Validation overlap with test: {len(set(split.validation.index).intersection(set(split.test.index))):,}")
+
+
 def main() -> None:
     feature_engine = FeatureEngine()
     hypothesis_engine = HypothesisEngine()
@@ -111,10 +122,11 @@ def main() -> None:
         print(
             f"Split -> train: {len(split.train):,}, validation: {len(split.validation):,}, test: {len(split.test):,}"
         )
+        _audit_report(df, split)
 
         # Generation 0
         hypotheses = hypothesis_engine.generate_from_dataframe(df, max_features=2)
-        print(f"Generated hypotheses: {len(hypotheses):,}")
+        print(f"\nGenerated hypotheses: {len(hypotheses):,}")
 
         for hyp in hypotheses:
             knowledge.add_hypothesis(hyp)
@@ -166,8 +178,11 @@ def main() -> None:
         proposals = evolution.proposals_as_hypotheses(top_n=10)
         print("\nEvolution Proposals")
         print("-" * 120)
-        for p in proposals[:10]:
-            print(f"{p.id} | {p.direction} | {[(c.feature, c.operator, c.value) for c in p.conditions]} | {p.signature}")
+        if proposals:
+            for p in proposals[:10]:
+                print(f"{p.id} | {p.direction} | {[(c.feature, c.operator, c.value) for c in p.conditions]} | {p.signature}")
+        else:
+            print("No evolution proposals.")
 
         if proposals:
             for hyp in proposals:
@@ -195,6 +210,8 @@ def main() -> None:
                     f"exp={row['expectancy']:.4f} | conf={row['confidence']:.4f} | "
                     f"stab={row['stability']:.4f} | occ={int(row['occurrence'])} | gap={row['gap']:.4f}"
                 )
+        else:
+            print("\nEvolution Accepted hypotheses: 0/0")
 
         print(f"\nRuntime : {time.time() - start:.2f} sec")
     finally:
