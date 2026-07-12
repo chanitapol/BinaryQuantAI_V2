@@ -15,8 +15,11 @@ class KnowledgeEngine:
         self._rankings = []
         self._create_tables()
         self._migrate_schema()
+        self._create_indexes()
 
     def _create_tables(self):
+        # Create tables only. Do not create indexes on newly introduced columns here:
+        # an existing legacy table may not have those columns until migration runs.
         self.cur.executescript("""
         CREATE TABLE IF NOT EXISTS research_runs(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -69,11 +72,6 @@ class KnowledgeEngine:
             key TEXT PRIMARY KEY,
             value TEXT
         );
-
-        CREATE INDEX IF NOT EXISTS idx_experiments_run_generation
-            ON experiments(run_id, generation);
-        CREATE INDEX IF NOT EXISTS idx_rankings_run_generation
-            ON rankings(run_id, generation);
         """)
         self.conn.commit()
 
@@ -81,11 +79,15 @@ class KnowledgeEngine:
         return {str(row[1]) for row in self.cur.execute(f"PRAGMA table_info({table})").fetchall()}
 
     def _migrate_schema(self) -> None:
-        # SQLite CREATE TABLE IF NOT EXISTS does not add columns to old databases.
+        # CREATE TABLE IF NOT EXISTS never alters an existing legacy table.
+        # Add required columns first, then indexes are created separately.
         if "generation" not in self._column_names("experiments"):
             self.cur.execute("ALTER TABLE experiments ADD COLUMN generation INTEGER NOT NULL DEFAULT 0")
         if "generation" not in self._column_names("rankings"):
             self.cur.execute("ALTER TABLE rankings ADD COLUMN generation INTEGER NOT NULL DEFAULT 0")
+        self.conn.commit()
+
+    def _create_indexes(self) -> None:
         self.cur.execute("CREATE INDEX IF NOT EXISTS idx_experiments_run_generation ON experiments(run_id, generation)")
         self.cur.execute("CREATE INDEX IF NOT EXISTS idx_rankings_run_generation ON rankings(run_id, generation)")
         self.conn.commit()
