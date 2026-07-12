@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -8,96 +8,71 @@ from typing import Any
 import pandas as pd
 
 
-@dataclass
-class FeatureStat:
-    feature: str
-    total: int
-    passed: int
-    rejected: int
-    avg_score: float
-    avg_winrate: float
-
-
-@dataclass
-class ThresholdStat:
-    feature: str
-    operator: str
-    threshold: str
-    total: int
-    passed: int
-    avg_score: float
-    avg_expectancy: float
+FEATURE_COLUMNS = ["feature", "total", "passed", "rejected", "avg_score", "avg_winrate"]
+THRESHOLD_COLUMNS = ["feature", "operator", "threshold", "total", "passed", "avg_score", "avg_expectancy"]
 
 
 class StatisticsEngine:
-    """Read research.db and aggregate experiment statistics."""
+    """Aggregate experiment statistics within an explicit research run scope."""
 
-    def __init__(self, db_path: str = "research.db") -> None:
+    def __init__(self, db_path: str = "research.db", run_id: int | None = None, generation: int | None = None) -> None:
         self.db_path = Path(db_path)
         self.conn = sqlite3.connect(self.db_path)
         self.conn.row_factory = sqlite3.Row
+        self.run_id = run_id
+        self.generation = generation
 
     def close(self) -> None:
         self.conn.close()
 
+    def set_scope(self, run_id: int | None = None, generation: int | None = None) -> None:
+        self.run_id = run_id
+        self.generation = generation
+
     def _experiments_df(self) -> pd.DataFrame:
-        return pd.read_sql_query("SELECT * FROM experiments", self.conn)
+        sql = "SELECT * FROM experiments WHERE 1=1"
+        params: list[object] = []
+        if self.run_id is not None:
+            sql += " AND run_id = ?"
+            params.append(self.run_id)
+        if self.generation is not None:
+            sql += " AND generation = ?"
+            params.append(self.generation)
+        return pd.read_sql_query(sql, self.conn, params=tuple(params))
 
     def _hypotheses_df(self) -> pd.DataFrame:
-        return pd.read_sql_query("SELECT * FROM hypotheses", self.conn)
+        return pd.read_sql_query("SELECT id, conditions FROM hypotheses", self.conn)
 
     @staticmethod
-    def _extract_conditions(df: pd.DataFrame) -> pd.DataFrame:
-        if df.empty:
-            return df
-
-        rows: list[dict[str, Any]] = []
-        for _, row in df.iterrows():
-            try:
-                conditions = pd.io.json.loads(row["conditions"])
-            except Exception:
-                conditions = []
-            for cond in conditions:
-                value = cond.get("value")
-                if isinstance(value, (list, tuple)):
-                    value = jsonable(value)
-                rows.append(
-                    {
-                        "hypothesis_id": row["id"],
-                        "feature": cond.get("feature"),
-                        "operator": cond.get("operator"),
-                        "threshold": str(value),
-                    }
-                )
-        return pd.DataFrame(rows)
+    def _conditions(value: object) -> list[dict[str, Any]]:
+        try:
+            parsed = json.loads(value or "[]")
+            return parsed if isinstance(parsed, list) else []
+        except Exception:
+            return []
 
     def feature_statistics(self) -> pd.DataFrame:
         ex = self._experiments_df()
         hy = self._hypotheses_df()
         if ex.empty or hy.empty:
-            return pd.DataFrame(columns=["feature", "total", "passed", "rejected", "avg_score", "avg_winrate"])
+            return pd.DataFrame(columns=FEATURE_COLUMNS)
 
-        merged = ex.merge(hy[["id", "conditions"]], left_on="hypothesis_id", right_on="id", how="left")
+        merged = ex.merge(hy, left_on="hypothesis_id", right_on="id", how="left")
         rows: list[dict[str, Any]] = []
         for _, row in merged.iterrows():
-            try:
-                conditions = pd.io.json.loads(row["conditions"])
-            except Exception:
-                conditions = []
-            features = sorted({c.get("feature") for c in conditions if c.get("feature") is not None})
-            if not features:
-                continue
+            features = sorted({
+                c.get("feature") for c in self._conditions(row.get("conditions"))
+                if c.get("feature") is not None
+            })
             for feature in features:
-                rows.append(
-                    {
-                        "feature": feature,
-                        "status": row.get("status"),
-                        "score": row.get("score", 0.0),
-                        "winrate": row.get("validation_winrate", 0.0),
-                    }
-                )
+                rows.append({
+                    "feature": feature,
+                    "status": row.get("status"),
+                    "score": row.get("score", 0.0),
+                    "winrate": row.get("validation_win", 0.0),
+                })
         if not rows:
-            return pd.DataFrame(columns=["feature", "total", "passed", "rejected", "avg_score", "avg_winrate"])
+            return pd.DataFrame(columns=FEATURE_COLUMNS)
 
         tmp = pd.DataFrame(rows)
         out = (
@@ -117,31 +92,25 @@ class StatisticsEngine:
         ex = self._experiments_df()
         hy = self._hypotheses_df()
         if ex.empty or hy.empty:
-            return pd.DataFrame(columns=["feature", "operator", "threshold", "total", "passed", "avg_score", "avg_expectancy"])
+            return pd.DataFrame(columns=THRESHOLD_COLUMNS)
 
-        merged = ex.merge(hy[["id", "conditions"]], left_on="hypothesis_id", right_on="id", how="left")
+        merged = ex.merge(hy, left_on="hypothesis_id", right_on="id", how="left")
         rows: list[dict[str, Any]] = []
         for _, row in merged.iterrows():
-            try:
-                conditions = pd.io.json.loads(row["conditions"])
-            except Exception:
-                conditions = []
-            for cond in conditions:
+            for cond in self._conditions(row.get("conditions")):
                 feature = cond.get("feature")
                 if feature is None:
                     continue
-                rows.append(
-                    {
-                        "feature": feature,
-                        "operator": cond.get("operator"),
-                        "threshold": str(cond.get("value")),
-                        "status": row.get("status"),
-                        "score": row.get("score", 0.0),
-                        "expectancy": row.get("expectancy", 0.0),
-                    }
-                )
+                rows.append({
+                    "feature": feature,
+                    "operator": cond.get("operator"),
+                    "threshold": json.dumps(cond.get("value"), sort_keys=True),
+                    "status": row.get("status"),
+                    "score": row.get("score", 0.0),
+                    "expectancy": row.get("expectancy", 0.0),
+                })
         if not rows:
-            return pd.DataFrame(columns=["feature", "operator", "threshold", "total", "passed", "avg_score", "avg_expectancy"])
+            return pd.DataFrame(columns=THRESHOLD_COLUMNS)
 
         tmp = pd.DataFrame(rows)
         out = (
@@ -161,11 +130,3 @@ class StatisticsEngine:
 
     def best_thresholds(self, limit: int = 20) -> pd.DataFrame:
         return self.threshold_statistics().head(limit)
-
-
-def jsonable(value: Any) -> Any:
-    if isinstance(value, tuple):
-        return list(value)
-    if isinstance(value, list):
-        return [jsonable(v) for v in value]
-    return value
