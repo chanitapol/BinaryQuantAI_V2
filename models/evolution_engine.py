@@ -140,11 +140,12 @@ class EvolutionEngine:
         if feature in cls.BOOLEAN_FEATURES:
             if operator == "between":
                 if isinstance(value, tuple) and len(value) == 2 and value[0] == value[1]:
-                    return feature, "=", int(value[0])
+                    return feature, "between", (int(value[0]), int(value[1]))
                 if isinstance(value, list) and len(value) == 2 and value[0] == value[1]:
-                    return feature, "=", int(value[0])
+                    return feature, "between", (int(value[0]), int(value[1]))
             if operator in {">", "<"} and isinstance(value, (int, float)) and float(value) in {0.0, 1.0}:
-                return feature, "=", int(round(float(value)))
+                v = int(round(float(value)))
+                return feature, "between", (v, v)
         return feature, operator, value
 
     def _merge_same_feature(self, left: Condition, right: Condition) -> Condition:
