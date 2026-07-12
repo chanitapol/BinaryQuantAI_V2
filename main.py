@@ -7,6 +7,7 @@ from models.ranking_engine import RankingEngine
 from models.knowledge_engine import KnowledgeEngine
 from models.statistics_engine import StatisticsEngine
 from models.evolution_engine import EvolutionEngine
+from models.audit_engine import AuditEngine
 
 import pandas as pd
 import time
@@ -86,15 +87,19 @@ def _evaluate_hypotheses(
     return ranked
 
 
-def _audit_report(df: pd.DataFrame, split) -> None:
+def _audit_report(audit_result) -> None:
     print("\nAudit Report")
     print("-" * 120)
-    print(f"Rows: {len(df):,}")
-    print(f"Features: {len(df.columns):,}")
-    print(f"Train/Validation/Test: {len(split.train):,} / {len(split.validation):,} / {len(split.test):,}")
-    print(f"Train overlap with validation: {len(set(split.train.index).intersection(set(split.validation.index))):,}")
-    print(f"Train overlap with test: {len(set(split.train.index).intersection(set(split.test.index))):,}")
-    print(f"Validation overlap with test: {len(set(split.validation.index).intersection(set(split.test.index))):,}")
+    print(f"Passed: {audit_result.passed}")
+    if audit_result.issues:
+        print("Issues:")
+        for issue in audit_result.issues:
+            print(f"- {issue}")
+    else:
+        print("Issues: none")
+    print("Metrics:")
+    for key, value in audit_result.metrics.items():
+        print(f"- {key}: {value}")
 
 
 def main() -> None:
@@ -106,6 +111,7 @@ def main() -> None:
     knowledge = KnowledgeEngine("research.db")
     stats = None
     evolution = None
+    audit_engine = AuditEngine()
 
     start = time.time()
     run_id = 1
@@ -122,7 +128,9 @@ def main() -> None:
         print(
             f"Split -> train: {len(split.train):,}, validation: {len(split.validation):,}, test: {len(split.test):,}"
         )
-        _audit_report(df, split)
+
+        audit_result = audit_engine.audit(df, split)
+        _audit_report(audit_result)
 
         # Generation 0
         hypotheses = hypothesis_engine.generate_from_dataframe(df, max_features=2)
