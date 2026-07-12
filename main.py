@@ -13,16 +13,7 @@ import pandas as pd
 import time
 
 
-def _evaluate_hypotheses(
-    hypotheses,
-    split,
-    runner,
-    validator,
-    ranking_engine,
-    knowledge,
-    run_id: int,
-    generation: int,
-):
+def _evaluate_hypotheses(hypotheses, split, runner, validator, ranking_engine, knowledge, run_id: int, generation: int):
     results = []
     for hyp in hypotheses:
         train_result = runner.evaluate(split.train, hyp)
@@ -37,13 +28,7 @@ def _evaluate_hypotheses(
         )
 
         if validation.passed:
-            print(
-                hyp.id,
-                train_result.winrate,
-                validation_result.winrate,
-                test_result.winrate,
-                validation_result.occurrence,
-            )
+            print(hyp.id, train_result.winrate, validation_result.winrate, test_result.winrate, validation_result.occurrence)
 
         score, expectancy, confidence, stability = ranking_engine.score(
             train_winrate=train_result.winrate,
@@ -78,6 +63,7 @@ def _evaluate_hypotheses(
     for _, row in ranked.iterrows():
         knowledge.add_ranking(
             run_id=run_id,
+            generation=generation,
             hypothesis_id=row["hypothesis_id"],
             rank=int(row["rank"]),
             score=float(row["score"]),
@@ -114,44 +100,41 @@ def main() -> None:
     audit_engine = AuditEngine()
 
     start = time.time()
-    run_id = 1
+    run_id = None
+    run_completed = False
 
     try:
         df = feature_engine.run()
+        run_id = knowledge.start_run(rows=len(df), features=len(df.columns), notes="BinaryQuantAI V2 research run")
+
         print("=" * 70)
         print("BinaryQuantAI V2")
         print("=" * 70)
+        print(f"Run ID    : {run_id}")
         print(f"Rows      : {len(df):,}")
         print(f"Features  : {len(df.columns):,}")
 
         split = split_dataframe(df, train_ratio=0.70, validation_ratio=0.15)
-        print(
-            f"Split -> train: {len(split.train):,}, validation: {len(split.validation):,}, test: {len(split.test):,}"
-        )
+        print(f"Split -> train: {len(split.train):,}, validation: {len(split.validation):,}, test: {len(split.test):,}")
 
         audit_result = audit_engine.audit(df, split)
         _audit_report(audit_result)
 
-        # Generation 0
         hypotheses = hypothesis_engine.generate_from_dataframe(df, max_features=2)
         print(f"\nGenerated hypotheses: {len(hypotheses):,}")
-
         for hyp in hypotheses:
             knowledge.add_hypothesis(hyp)
 
         ranked = _evaluate_hypotheses(
-            hypotheses=hypotheses,
-            split=split,
-            runner=runner,
-            validator=validator,
-            ranking_engine=ranking_engine,
-            knowledge=knowledge,
-            run_id=run_id,
-            generation=0,
+            hypotheses, split, runner, validator, ranking_engine, knowledge,
+            run_id=run_id, generation=0,
         )
 
-        stats = StatisticsEngine("research.db")
+        # Statistics are intentionally isolated to this run and generation 0.
+        stats = StatisticsEngine("research.db", run_id=run_id, generation=0)
         evolution = EvolutionEngine("research.db")
+        # EvolutionEngine owns a KnowledgeQuery; scope it to the current run/generation.
+        evolution.query.set_scope(run_id=run_id, generation=0)
 
         accepted = int((ranked["status"] == "PASS").sum())
         print(f"Accepted hypotheses: {accepted}/{len(ranked)}")
@@ -166,23 +149,16 @@ def main() -> None:
                 f"stab={row['stability']:.4f} | occ={int(row['occurrence'])} | gap={row['gap']:.4f}"
             )
 
-        print("\nTop Features")
+        print("\nTop Features (current run, generation 0)")
         print("-" * 120)
         top_features = stats.top_features(10)
-        if not top_features.empty:
-            print(top_features.to_string(index=False))
-        else:
-            print("No feature statistics yet.")
+        print(top_features.to_string(index=False) if not top_features.empty else "No feature statistics yet.")
 
-        print("\nBest Thresholds")
+        print("\nBest Thresholds (current run, generation 0)")
         print("-" * 120)
         best_thresholds = stats.best_thresholds(10)
-        if not best_thresholds.empty:
-            print(best_thresholds.to_string(index=False))
-        else:
-            print("No threshold statistics yet.")
+        print(best_thresholds.to_string(index=False) if not best_thresholds.empty else "No threshold statistics yet.")
 
-        # Generation 1: evaluate evolution proposals as real hypotheses.
         proposals = evolution.proposals_as_hypotheses(top_n=10)
         print("\nEvolution Proposals")
         print("-" * 120)
@@ -197,14 +173,8 @@ def main() -> None:
                 knowledge.add_hypothesis(hyp)
 
             evolved_ranked = _evaluate_hypotheses(
-                hypotheses=proposals,
-                split=split,
-                runner=runner,
-                validator=validator,
-                ranking_engine=ranking_engine,
-                knowledge=knowledge,
-                run_id=run_id,
-                generation=1,
+                proposals, split, runner, validator, ranking_engine, knowledge,
+                run_id=run_id, generation=1,
             )
 
             accepted_evo = int((evolved_ranked["status"] == "PASS").sum())
@@ -221,7 +191,13 @@ def main() -> None:
         else:
             print("\nEvolution Accepted hypotheses: 0/0")
 
+        knowledge.finish_run(run_id, status="COMPLETED")
+        run_completed = True
         print(f"\nRuntime : {time.time() - start:.2f} sec")
+    except Exception as exc:
+        if run_id is not None and not run_completed:
+            knowledge.finish_run(run_id, status="FAILED", notes=f"{type(exc).__name__}: {exc}")
+        raise
     finally:
         if evolution is not None:
             evolution.close()
