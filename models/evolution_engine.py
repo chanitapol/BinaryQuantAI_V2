@@ -30,6 +30,55 @@ class EvolutionEngine:
     MIN_THRESHOLD_TOTAL = 50
     EXPLORATION_FALLBACK_LIMIT = 10
 
+    NORMALIZED_FEATURE_ALLOWLIST = {
+        "range_log",
+        "rolling_mean_10",
+        "rolling_mean_20",
+        "rolling_std_10",
+        "rolling_std_20",
+        "rolling_range_10",
+        "rolling_range_20",
+        "body_to_wick",
+        "wick_to_body",
+        "momentum_x_range",
+        "body_x_volatility",
+        "volatility_20",
+        "atr_14",
+        "zbody_20",
+        "zrange_20",
+        "pbody_20",
+        "prange_20",
+        "pvol_20",
+        "trend_5",
+        "trend_20",
+        "prev_body",
+        "prev_range",
+        "prev_close",
+        "prev_open",
+        "prev_upper_wick",
+        "prev_lower_wick",
+        "engulf_bull",
+        "engulf_bear",
+        "pinbar_bull",
+        "pinbar_bear",
+        "is_asia_session",
+        "is_london_session",
+        "is_newyork_session",
+        "hour",
+        "minute",
+        "dayofweek",
+    }
+
+    BOOLEAN_FEATURES = {
+        "is_asia_session",
+        "is_london_session",
+        "is_newyork_session",
+        "engulf_bull",
+        "engulf_bear",
+        "pinbar_bull",
+        "pinbar_bear",
+    }
+
     def __init__(self, db_path: str = "research.db") -> None:
         self.db_path = Path(db_path)
         self.query = KnowledgeQuery(db_path)
@@ -72,6 +121,31 @@ class EvolutionEngine:
     @staticmethod
     def _is_number(value: object) -> bool:
         return isinstance(value, (int, float))
+
+    @classmethod
+    def _is_allowed_feature(cls, feature: str) -> bool:
+        if not feature:
+            return False
+        if feature in cls.NORMALIZED_FEATURE_ALLOWLIST:
+            return True
+        blocked_exact = {"open", "high", "low", "close", "bid", "ask", "price"}
+        if feature in blocked_exact:
+            return False
+        if feature.startswith(("raw_", "price_", "candlestick_")):
+            return False
+        return False
+
+    @classmethod
+    def _canonicalize_feature_threshold(cls, feature: str, operator: str, value: object) -> tuple[str, str, object]:
+        if feature in cls.BOOLEAN_FEATURES:
+            if operator == "between":
+                if isinstance(value, tuple) and len(value) == 2 and value[0] == value[1]:
+                    return feature, "=", int(value[0])
+                if isinstance(value, list) and len(value) == 2 and value[0] == value[1]:
+                    return feature, "=", int(value[0])
+            if operator in {">", "<"} and isinstance(value, (int, float)) and float(value) in {0.0, 1.0}:
+                return feature, "=", int(round(float(value)))
+        return feature, operator, value
 
     def _merge_same_feature(self, left: Condition, right: Condition) -> Condition:
         feature = left.feature
@@ -161,6 +235,10 @@ class EvolutionEngine:
                 before = len(df)
                 df = df[df["total"].fillna(0).astype(int) >= self.MIN_THRESHOLD_TOTAL]
                 print(f"[Evolution] Thresholds after evidence filter: {len(df)}/{before}")
+            if "feature" in df.columns:
+                df = df[df["feature"].apply(self._is_allowed_feature)].copy()
+            if df.empty:
+                return pd.DataFrame()
             return df.head(limit).reset_index(drop=True)
         except Exception as exc:
             print(f"[Evolution] Threshold load failed: {type(exc).__name__}: {exc}")
@@ -173,13 +251,18 @@ class EvolutionEngine:
             return self._simplify_conditions(conditions)
 
         for feat in candidate_features:
-            if feat in existing:
+            if feat in existing or not self._is_allowed_feature(feat):
                 continue
             row = thresholds[thresholds["feature"] == feat].head(1)
             if row.empty:
                 continue
             r = row.iloc[0]
-            conditions.append(Condition(feat, str(r.get("operator", ">")), self._normalize_threshold(r.get("threshold"))))
+            feature, operator, value = self._canonicalize_feature_threshold(
+                feat,
+                str(r.get("operator", ">")),
+                self._normalize_threshold(r.get("threshold")),
+            )
+            conditions.append(Condition(feature, operator, value))
             break
         return self._simplify_conditions(conditions)
 
@@ -215,7 +298,10 @@ class EvolutionEngine:
             value = self._normalize_threshold(row.get("threshold"))
             if feature is None or operator is None:
                 continue
-            candidates.append(EvolutionCandidate("", f"EV{i:06d}", str(feature), str(operator), value, "best_threshold"))
+            if not self._is_allowed_feature(str(feature)):
+                continue
+            feature, operator, value = self._canonicalize_feature_threshold(str(feature), str(operator), value)
+            candidates.append(EvolutionCandidate("", f"EV{i:06d}", feature, operator, value, "best_threshold"))
         return candidates
 
     def _eligible_rankings(self, top_n: int = 20) -> pd.DataFrame:
@@ -265,7 +351,7 @@ class EvolutionEngine:
         seen_features: set[str] = set()
         for _, row in thresholds.iterrows():
             feature = str(row.get("feature", ""))
-            if not feature or feature in seen_features:
+            if not feature or feature in seen_features or not self._is_allowed_feature(feature):
                 continue
             seen_features.add(feature)
             rows.append(row)
@@ -274,24 +360,30 @@ class EvolutionEngine:
         for i in range(len(rows)):
             for j in range(i + 1, len(rows)):
                 r1, r2 = rows[i], rows[j]
-                conditions = self._simplify_conditions([
-                    Condition(str(r1["feature"]), str(r1.get("operator", ">")), self._normalize_threshold(r1.get("threshold"))),
-                    Condition(str(r2["feature"]), str(r2.get("operator", ">")), self._normalize_threshold(r2.get("threshold"))),
-                ])
+                c1 = self._canonicalize_feature_threshold(
+                    str(r1["feature"]),
+                    str(r1.get("operator", ">")),
+                    self._normalize_threshold(r1.get("threshold")),
+                )
+                c2 = self._canonicalize_feature_threshold(
+                    str(r2["feature"]),
+                    str(r2.get("operator", ">")),
+                    self._normalize_threshold(r2.get("threshold")),
+                )
+                conditions = self._simplify_conditions([Condition(*c1), Condition(*c2)])
                 if len(conditions) < 2:
                     continue
-                for direction in ("BUY", "SELL"):
-                    proposals.append({
-                        "parent_id": "EXPLORATION",
-                        "direction": direction,
-                        "conditions": [{"feature": c.feature, "operator": c.operator, "value": c.value} for c in conditions],
-                        "source_score": 0.0,
-                        "evolution_bias": 0.0,
-                        "reason": "qualified_parent_unavailable_threshold_exploration",
-                    })
-                    if len(proposals) >= self.EXPLORATION_FALLBACK_LIMIT:
-                        print(f"[Evolution] Exploration proposals built: {len(proposals)}")
-                        return proposals
+                proposals.append({
+                    "parent_id": "EXPLORATION",
+                    "direction": "BUY",
+                    "conditions": [{"feature": c.feature, "operator": c.operator, "value": c.value} for c in conditions],
+                    "source_score": 0.0,
+                    "evolution_bias": 0.0,
+                    "reason": "qualified_parent_unavailable_threshold_exploration",
+                })
+                if len(proposals) >= self.EXPLORATION_FALLBACK_LIMIT:
+                    print(f"[Evolution] Exploration proposals built: {len(proposals)}")
+                    return proposals
         print(f"[Evolution] Exploration proposals built: {len(proposals)}")
         return proposals
 
@@ -317,7 +409,7 @@ class EvolutionEngine:
             conditions = [
                 Condition(cond.get("feature"), cond.get("operator"), cond.get("value"))
                 for cond in parsed
-                if cond.get("feature") is not None and cond.get("operator") is not None
+                if cond.get("feature") is not None and cond.get("operator") is not None and self._is_allowed_feature(str(cond.get("feature")))
             ]
             if not conditions:
                 continue
@@ -334,7 +426,6 @@ class EvolutionEngine:
             })
 
         if not proposals:
-            print("[Evolution] No mutation proposals; falling back to exploration")
             return self._exploration_proposals(top_n)
 
         if len(parent_ids) >= 2 and not hypotheses.empty:
@@ -347,12 +438,12 @@ class EvolutionEngine:
                 conds1 = self._simplify_conditions([
                     Condition(c.get("feature"), c.get("operator"), c.get("value"))
                     for c in self._safe_json_loads(p1.get("conditions"))
-                    if c.get("feature") is not None and c.get("operator") is not None
+                    if c.get("feature") is not None and c.get("operator") is not None and self._is_allowed_feature(str(c.get("feature")))
                 ])
                 conds2 = self._simplify_conditions([
                     Condition(c.get("feature"), c.get("operator"), c.get("value"))
                     for c in self._safe_json_loads(p2.get("conditions"))
-                    if c.get("feature") is not None and c.get("operator") is not None
+                    if c.get("feature") is not None and c.get("operator") is not None and self._is_allowed_feature(str(c.get("feature")))
                 ])
                 if not conds1 or not conds2:
                     continue
