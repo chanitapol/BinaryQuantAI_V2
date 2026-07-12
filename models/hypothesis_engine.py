@@ -30,9 +30,10 @@ class Hypothesis:
 class HypothesisEngine:
     """Knowledge-guided hypothesis generator.
 
-    V3.1 behavior:
+    V3.2 behavior:
     - Prefer feature_statistics and threshold_statistics from research.db when available.
     - Exclude raw OHLCV columns.
+    - Prefer semantic indicator and regime features when present.
     - Fall back to dataframe quantiles when knowledge tables are empty.
     - Support both legacy generate(feature_rules=...) and dataframe-driven generation.
     """
@@ -47,6 +48,64 @@ class HypothesisEngine:
         "close",
         "volume",
         "direction",
+    }
+
+    SEMANTIC_PRIORITY_PREFIXES = (
+        "rsi_",
+        "ema_",
+        "macd",
+        "bb_",
+        "stoch_",
+        "adx_",
+        "plus_di_",
+        "minus_di_",
+        "roc_",
+        "trend_regime_",
+        "mean_reversion_",
+        "breakout_",
+        "false_break_",
+        "compression_",
+        "rejection_",
+        "hh_",
+        "lh_",
+        "bull_streak_",
+        "bear_streak_",
+    )
+
+    SEMANTIC_FEATURE_ALLOWLIST = {
+        "rsi14_oversold",
+        "rsi14_overbought",
+        "rsi14_cross_30_up",
+        "rsi14_cross_70_down",
+        "ema_bull_alignment",
+        "ema_bear_alignment",
+        "ema_5_20_spread_atr",
+        "ema_10_50_spread_atr",
+        "macd_bull_cross",
+        "macd_bear_cross",
+        "bb_squeeze",
+        "bb_break_upper",
+        "bb_break_lower",
+        "stoch_bull_cross",
+        "stoch_bear_cross",
+        "adx_trending",
+        "di_bull",
+        "di_bear",
+        "trend_regime_bull",
+        "trend_regime_bear",
+        "mean_reversion_long",
+        "mean_reversion_short",
+        "compression_expansion",
+        "rejection_bull",
+        "rejection_bear",
+        "breakout_up_20",
+        "breakout_down_20",
+        "false_break_up_20",
+        "false_break_down_20",
+        "hh_hl_2",
+        "lh_ll_2",
+        "bull_streak_3",
+        "bear_streak_3",
     }
 
     def __init__(
@@ -79,6 +138,16 @@ class HypothesisEngine:
 
     def _numeric_features(self, df: pd.DataFrame) -> list[str]:
         cols = df.select_dtypes(include=np.number).columns
+        return [c for c in cols if c not in self.EXCLUDE_COLUMNS]
+
+    def _semantic_features(self, df: pd.DataFrame) -> list[str]:
+        cols = self._numeric_features(df)
+        semantic = [
+            c for c in cols
+            if c in self.SEMANTIC_FEATURE_ALLOWLIST or c.startswith(self.SEMANTIC_PRIORITY_PREFIXES)
+        ]
+        if semantic:
+            return semantic
         return [c for c in cols if c not in self.EXCLUDE_COLUMNS]
 
     def _best_features_from_db(self) -> list[str]:
@@ -177,11 +246,9 @@ class HypothesisEngine:
             (">", q60),
             (">", q70),
             (">", q80),
-
             ("<", q40),
             ("<", q30),
             ("<", q20),
-  
             ("between", (q40, q60)),
         ]
 
@@ -224,10 +291,47 @@ class HypothesisEngine:
         if not cols:
             return []
 
+        semantic = [c for c in self._semantic_features(df) if c in cols]
         learned = [f for f in self._best_features_from_db() if f in cols]
-        if learned:
-            return learned[: self.max_features]
-        return [c for c in cols if c not in self.EXCLUDE_COLUMNS][: self.max_features]
+        ordered: list[str] = []
+        for bucket in (semantic, learned, cols):
+            for c in bucket:
+                if c not in ordered and c not in self.EXCLUDE_COLUMNS:
+                    ordered.append(c)
+        return ordered[: self.max_features]
+
+    def feature_inventory(self, df: pd.DataFrame) -> pd.DataFrame:
+        rows: list[dict[str, object]] = []
+        numeric = self._numeric_features(df)
+        semantic = set(self._semantic_features(df))
+        for c in numeric:
+            rows.append({
+                "feature": c,
+                "is_semantic": int(c in semantic),
+                "dtype": str(df[c].dtype),
+                "n_unique": int(df[c].nunique(dropna=True)),
+                "missing": int(df[c].isna().sum()),
+            })
+        return pd.DataFrame(rows).sort_values(["is_semantic", "n_unique", "feature"], ascending=[False, False, True]).reset_index(drop=True)
+
+    def diagnostics(self, df: pd.DataFrame) -> dict[str, object]:
+        numeric = self._numeric_features(df)
+        semantic = [c for c in self._semantic_features(df) if c in numeric]
+        indicator_prefix_counts = {
+            "rsi": sum(c.startswith("rsi_") for c in numeric),
+            "ema": sum(c.startswith("ema_") for c in numeric),
+            "macd": sum(c.startswith("macd") for c in numeric),
+            "bb": sum(c.startswith("bb_") for c in numeric),
+            "stoch": sum(c.startswith("stoch_") for c in numeric),
+            "adx": sum(c.startswith("adx_") for c in numeric),
+            "regime": sum(c.startswith(("trend_regime_", "mean_reversion_", "breakout_", "false_break_", "compression_", "rejection_")) for c in numeric),
+        }
+        return {
+            "total_numeric_features": len(numeric),
+            "semantic_features": semantic,
+            "semantic_count": len(semantic),
+            "prefix_counts": indicator_prefix_counts,
+        }
 
     def _build_single_feature_hypotheses(
         self,
@@ -278,7 +382,7 @@ class HypothesisEngine:
         hypotheses: list[Hypothesis] = []
         seen: set[str] = set()
         hid = 1
-        top = features[: min(15, len(features))]
+        top = features[: min(20, len(features))]
         if len(top) < 2:
             return []
 
@@ -298,8 +402,8 @@ class HypothesisEngine:
             mut1 = self._mutation_candidates(op1, v1)
             mut2 = self._mutation_candidates(op2, v2)
 
-            for nv1 in mut1[:3]:
-                for nv2 in mut2[:3]:
+            for nv1 in mut1[:4]:
+                for nv2 in mut2[:4]:
                     for direction in ("BUY", "SELL"):
                         cond = [Condition(f1, op1, nv1), Condition(f2, op2, nv2)]
                         sig = self._signature(direction, cond)
