@@ -88,6 +88,28 @@ def _audit_report(audit_result) -> None:
         print(f"- {key}: {value}")
 
 
+def _print_feature_diagnostics(df: pd.DataFrame, hypothesis_engine: HypothesisEngine) -> None:
+    diag = hypothesis_engine.diagnostics(df)
+    print("\nFeature Diagnostics")
+    print("-" * 120)
+    print(f"Total numeric features: {diag['total_numeric_features']}")
+    print(f"Semantic feature count : {diag['semantic_count']}")
+    prefix_counts = diag.get("prefix_counts", {})
+    print(
+        "Indicator prefixes     : "
+        f"RSI={prefix_counts.get('rsi', 0)}, EMA={prefix_counts.get('ema', 0)}, MACD={prefix_counts.get('macd', 0)}, "
+        f"BB={prefix_counts.get('bb', 0)}, Stoch={prefix_counts.get('stoch', 0)}, ADX={prefix_counts.get('adx', 0)}, "
+        f"Regime={prefix_counts.get('regime', 0)}"
+    )
+    inventory = hypothesis_engine.feature_inventory(df)
+    print("\nTop 20 feature inventory")
+    print("-" * 120)
+    if not inventory.empty:
+        print(inventory.head(20).to_string(index=False))
+    else:
+        print("No features detected.")
+
+
 def main() -> None:
     feature_engine = FeatureEngine()
     hypothesis_engine = HypothesisEngine()
@@ -113,6 +135,8 @@ def main() -> None:
         print(f"Run ID    : {run_id}")
         print(f"Rows      : {len(df):,}")
         print(f"Features  : {len(df.columns):,}")
+
+        _print_feature_diagnostics(df, hypothesis_engine)
 
         split = split_dataframe(df, train_ratio=0.70, validation_ratio=0.15)
         print(f"Split -> train: {len(split.train):,}, validation: {len(split.validation):,}, test: {len(split.test):,}")
