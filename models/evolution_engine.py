@@ -30,54 +30,79 @@ class EvolutionEngine:
     MIN_THRESHOLD_TOTAL = 50
     EXPLORATION_FALLBACK_LIMIT = 10
 
-    NORMALIZED_FEATURE_ALLOWLIST = {
-        "range_log",
+    BLOCKED_FEATURES = {
+        "open",
+        "high",
+        "low",
+        "close",
+        "prev_open",
+        "prev_close",
+        "prev_high",
+        "prev_low",
+        "rolling_mean_5",
         "rolling_mean_10",
         "rolling_mean_20",
         "rolling_std_10",
         "rolling_std_20",
-        "rolling_range_10",
-        "rolling_range_20",
-        "body_to_wick",
-        "wick_to_body",
-        "momentum_x_range",
-        "body_x_volatility",
-        "volatility_20",
-        "atr_14",
-        "zbody_20",
-        "zrange_20",
-        "pbody_20",
-        "prange_20",
-        "pvol_20",
-        "trend_5",
-        "trend_20",
-        "prev_body",
-        "prev_range",
-        "prev_close",
-        "prev_open",
-        "prev_upper_wick",
-        "prev_lower_wick",
-        "engulf_bull",
-        "engulf_bear",
-        "pinbar_bull",
-        "pinbar_bear",
-        "is_asia_session",
-        "is_london_session",
-        "is_newyork_session",
-        "hour",
-        "minute",
-        "dayofweek",
     }
 
-    BOOLEAN_FEATURES = {
-        "is_asia_session",
-        "is_london_session",
-        "is_newyork_session",
-        "engulf_bull",
-        "engulf_bear",
-        "pinbar_bull",
-        "pinbar_bear",
+    SEMANTIC_FEATURE_ALLOWLIST = {
+        "rsi14_oversold",
+        "rsi14_overbought",
+        "rsi14_cross_30_up",
+        "rsi14_cross_70_down",
+        "ema_bull_alignment",
+        "ema_bear_alignment",
+        "ema_5_20_spread_atr",
+        "ema_10_50_spread_atr",
+        "macd_bull_cross",
+        "macd_bear_cross",
+        "bb_squeeze",
+        "bb_break_upper",
+        "bb_break_lower",
+        "stoch_bull_cross",
+        "stoch_bear_cross",
+        "adx_trending",
+        "di_bull",
+        "di_bear",
+        "trend_regime_bull",
+        "trend_regime_bear",
+        "mean_reversion_long",
+        "mean_reversion_short",
+        "compression_expansion",
+        "rejection_bull",
+        "rejection_bear",
+        "breakout_up_20",
+        "breakout_down_20",
+        "false_break_up_20",
+        "false_break_down_20",
+        "hh_hl_2",
+        "lh_ll_2",
+        "bull_streak_3",
+        "bear_streak_3",
     }
+
+    SEMANTIC_PREFIXES = (
+        "rsi_",
+        "ema_",
+        "macd",
+        "bb_",
+        "stoch_",
+        "adx_",
+        "plus_di_",
+        "minus_di_",
+        "roc_",
+        "trend_regime_",
+        "mean_reversion_",
+        "breakout_",
+        "false_break_",
+        "compression_",
+        "rejection_",
+        "hh_",
+        "lh_",
+        "bull_streak_",
+        "bear_streak_",
+    )
 
     def __init__(self, db_path: str = "research.db") -> None:
         self.db_path = Path(db_path)
@@ -126,23 +151,19 @@ class EvolutionEngine:
     def _is_allowed_feature(cls, feature: str) -> bool:
         if not feature:
             return False
-        if feature in cls.NORMALIZED_FEATURE_ALLOWLIST:
+        if feature in cls.BLOCKED_FEATURES:
+            return False
+        if feature in cls.SEMANTIC_FEATURE_ALLOWLIST:
             return True
-        blocked_exact = {"open", "high", "low", "close", "bid", "ask", "price"}
-        if feature in blocked_exact:
-            return False
-        if feature.startswith(("raw_", "price_", "candlestick_")):
-            return False
-        return False
+        return feature.startswith(cls.SEMANTIC_PREFIXES)
 
-    @classmethod
-    def _canonicalize_feature_threshold(cls, feature: str, operator: str, value: object) -> tuple[str, str, object]:
-        if feature in cls.BOOLEAN_FEATURES:
-            if operator == "between":
-                if isinstance(value, tuple) and len(value) == 2 and value[0] == value[1]:
-                    return feature, "between", (int(value[0]), int(value[1]))
-                if isinstance(value, list) and len(value) == 2 and value[0] == value[1]:
-                    return feature, "between", (int(value[0]), int(value[1]))
+    @staticmethod
+    def _canonicalize_boolean_threshold(feature: str, operator: str, value: object) -> tuple[str, str, object]:
+        if feature.startswith(("is_", "engulf_", "pinbar_")):
+            if operator == "between" and isinstance(value, tuple) and len(value) == 2:
+                lo, hi = value
+                if lo == hi:
+                    return feature, "between", (int(lo), int(hi))
             if operator in {">", "<"} and isinstance(value, (int, float)) and float(value) in {0.0, 1.0}:
                 v = int(round(float(value)))
                 return feature, "between", (v, v)
@@ -237,7 +258,7 @@ class EvolutionEngine:
                 df = df[df["total"].fillna(0).astype(int) >= self.MIN_THRESHOLD_TOTAL]
                 print(f"[Evolution] Thresholds after evidence filter: {len(df)}/{before}")
             if "feature" in df.columns:
-                df = df[df["feature"].apply(self._is_allowed_feature)].copy()
+                df = df[df["feature"].astype(str).apply(self._is_allowed_feature)].copy()
             if df.empty:
                 return pd.DataFrame()
             return df.head(limit).reset_index(drop=True)
@@ -258,7 +279,7 @@ class EvolutionEngine:
             if row.empty:
                 continue
             r = row.iloc[0]
-            feature, operator, value = self._canonicalize_feature_threshold(
+            feature, operator, value = self._canonicalize_boolean_threshold(
                 feat,
                 str(r.get("operator", ">")),
                 self._normalize_threshold(r.get("threshold")),
@@ -299,9 +320,10 @@ class EvolutionEngine:
             value = self._normalize_threshold(row.get("threshold"))
             if feature is None or operator is None:
                 continue
-            if not self._is_allowed_feature(str(feature)):
+            feature = str(feature)
+            if not self._is_allowed_feature(feature):
                 continue
-            feature, operator, value = self._canonicalize_feature_threshold(str(feature), str(operator), value)
+            feature, operator, value = self._canonicalize_boolean_threshold(feature, str(operator), value)
             candidates.append(EvolutionCandidate("", f"EV{i:06d}", feature, operator, value, "best_threshold"))
         return candidates
 
@@ -318,10 +340,7 @@ class EvolutionEngine:
         rankings["occurrence"] = pd.to_numeric(rankings["occurrence"], errors="coerce").fillna(0)
         rankings["expectancy"] = pd.to_numeric(rankings["expectancy"], errors="coerce").fillna(float("-inf"))
         before = len(rankings)
-        rankings = rankings[
-            (rankings["occurrence"] >= self.MIN_PARENT_OCCURRENCE)
-            & (rankings["expectancy"] >= self.MIN_PARENT_EXP)
-        ].copy()
+        rankings = rankings[(rankings["occurrence"] >= self.MIN_PARENT_OCCURRENCE) & (rankings["expectancy"] >= self.MIN_PARENT_EXP)].copy()
         print(f"[Evolution] Parent rankings after evidence filter: {len(rankings)}/{before}")
         if rankings.empty:
             return rankings
@@ -361,16 +380,8 @@ class EvolutionEngine:
         for i in range(len(rows)):
             for j in range(i + 1, len(rows)):
                 r1, r2 = rows[i], rows[j]
-                c1 = self._canonicalize_feature_threshold(
-                    str(r1["feature"]),
-                    str(r1.get("operator", ">")),
-                    self._normalize_threshold(r1.get("threshold")),
-                )
-                c2 = self._canonicalize_feature_threshold(
-                    str(r2["feature"]),
-                    str(r2.get("operator", ">")),
-                    self._normalize_threshold(r2.get("threshold")),
-                )
+                c1 = self._canonicalize_boolean_threshold(str(r1["feature"]), str(r1.get("operator", ">")), self._normalize_threshold(r1.get("threshold")))
+                c2 = self._canonicalize_boolean_threshold(str(r2["feature"]), str(r2.get("operator", ">")), self._normalize_threshold(r2.get("threshold")))
                 conditions = self._simplify_conditions([Condition(*c1), Condition(*c2)])
                 if len(conditions) < 2:
                     continue
@@ -471,11 +482,7 @@ class EvolutionEngine:
         idx = 1
 
         for p in proposals:
-            conds = [
-                Condition(**c)
-                for c in p["conditions"]
-                if c.get("feature") is not None and c.get("operator") is not None
-            ]
+            conds = [Condition(**c) for c in p["conditions"] if c.get("feature") is not None and c.get("operator") is not None]
             conds = self._simplify_conditions(conds)
             if not conds:
                 continue
