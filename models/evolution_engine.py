@@ -444,10 +444,12 @@ class EvolutionEngine:
             if hrow is None:
                 continue
             parsed = self._safe_json_loads(hrow.get("conditions"))
+            # Preserve all parent conditions, including non-semantic ones, because
+            # accepted parents have already passed the discovery gate.
             conditions = [
                 Condition(cond.get("feature"), cond.get("operator"), cond.get("value"))
                 for cond in parsed
-                if cond.get("feature") is not None and cond.get("operator") is not None and self._is_allowed_feature(str(cond.get("feature")))
+                if cond.get("feature") is not None and cond.get("operator") is not None
             ]
             if not conditions:
                 continue
@@ -477,12 +479,12 @@ class EvolutionEngine:
                 conds1 = self._simplify_conditions([
                     Condition(c.get("feature"), c.get("operator"), c.get("value"))
                     for c in self._safe_json_loads(p1.get("conditions"))
-                    if c.get("feature") is not None and c.get("operator") is not None and self._is_allowed_feature(str(c.get("feature")))
+                    if c.get("feature") is not None and c.get("operator") is not None
                 ])
                 conds2 = self._simplify_conditions([
                     Condition(c.get("feature"), c.get("operator"), c.get("value"))
                     for c in self._safe_json_loads(p2.get("conditions"))
-                    if c.get("feature") is not None and c.get("operator") is not None and self._is_allowed_feature(str(c.get("feature")))
+                    if c.get("feature") is not None and c.get("operator") is not None
                 ])
                 if not conds1 or not conds2:
                     continue
