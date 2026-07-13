@@ -15,6 +15,7 @@ import time
 
 def _evaluate_hypotheses(hypotheses, split, runner, validator, ranking_engine, knowledge, run_id: int, generation: int):
     results = []
+    mode = "exploration" if generation == 0 else "production"
     for hyp in hypotheses:
         train_result = runner.evaluate(split.train, hyp)
         validation_result = runner.evaluate(split.validation, hyp)
@@ -25,6 +26,7 @@ def _evaluate_hypotheses(hypotheses, split, runner, validator, ranking_engine, k
             validation_winrate=validation_result.winrate,
             test_winrate=test_result.winrate,
             occurrence=validation_result.occurrence,
+            mode=mode,
         )
 
         if validation.passed:
@@ -52,6 +54,7 @@ def _evaluate_hypotheses(hypotheses, split, runner, validator, ranking_engine, k
             "gap": validation.gap,
             "score": score,
             "status": "PASS" if validation.passed else "REJECT",
+            "reject_reason": validation.reason,
             "runtime": 0.0,
         }
         results.append(row)
@@ -115,7 +118,7 @@ def main() -> None:
     hypothesis_engine = HypothesisEngine()
     validator = ValidationEngine()
     runner = ExperimentRunner()
-    ranking_engine = RankingEngine(payout=0.80)
+    ranking_engine = RankingEngine(payout=0.80, exploration_mode=True)
     knowledge = KnowledgeEngine("research.db")
     stats = None
     evolution = None
@@ -166,11 +169,12 @@ def main() -> None:
         print("\nTop 20 hypotheses")
         print("-" * 120)
         for _, row in ranked.head(20).iterrows():
+            reason = row.get("reject_reason", "accepted")
             print(
                 f"{row['rank']:4d} | {row['hypothesis_id']} | {row['status']:7s} | "
                 f"score={row['score']:.4f} | win={row['validation_winrate']:.4f} | "
                 f"exp={row['expectancy']:.4f} | conf={row['confidence']:.4f} | "
-                f"stab={row['stability']:.4f} | occ={int(row['occurrence'])} | gap={row['gap']:.4f}"
+                f"stab={row['stability']:.4f} | occ={int(row['occurrence'])} | gap={row['gap']:.4f} | reason={reason}"
             )
 
         print("\nTop Features (current run, generation 0)")
@@ -206,11 +210,12 @@ def main() -> None:
             print("\nTop 10 evolution hypotheses")
             print("-" * 120)
             for _, row in evolved_ranked.head(10).iterrows():
+                reason = row.get("reject_reason", "accepted")
                 print(
                     f"{row['rank']:4d} | {row['hypothesis_id']} | {row['status']:7s} | "
                     f"score={row['score']:.4f} | win={row['validation_winrate']:.4f} | "
                     f"exp={row['expectancy']:.4f} | conf={row['confidence']:.4f} | "
-                    f"stab={row['stability']:.4f} | occ={int(row['occurrence'])} | gap={row['gap']:.4f}"
+                    f"stab={row['stability']:.4f} | occ={int(row['occurrence'])} | gap={row['gap']:.4f} | reason={reason}"
                 )
         else:
             print("\nEvolution Accepted hypotheses: 0/0")
