@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
 from math import sqrt
 
@@ -15,15 +17,23 @@ class ValidationResult:
 
 
 class ValidationEngine:
+    """Validate hypotheses with separate exploration and production gates."""
+
     def __init__(
         self,
         min_winrate: float = 0.53,
         min_occurrence: int = 1000,
         max_gap: float = 0.03,
+        exploration_min_winrate: float = 0.55,
+        exploration_min_occurrence: int = 25,
+        exploration_max_gap: float = 0.12,
     ) -> None:
         self.min_winrate = min_winrate
         self.min_occurrence = min_occurrence
         self.max_gap = max_gap
+        self.exploration_min_winrate = exploration_min_winrate
+        self.exploration_min_occurrence = exploration_min_occurrence
+        self.exploration_max_gap = exploration_max_gap
 
     def confidence(self, winrate: float, occurrence: int) -> float:
         if occurrence <= 0:
@@ -36,9 +46,19 @@ class ValidationEngine:
         validation_winrate: float,
         test_winrate: float,
         occurrence: int,
+        mode: str = "production",
     ) -> ValidationResult:
         c = self.confidence(validation_winrate, occurrence)
         gap = abs(train_winrate - test_winrate)
+
+        if mode == "exploration":
+            if occurrence < self.exploration_min_occurrence:
+                return ValidationResult(False, "insufficient_occurrence_exploration", c, train_winrate, validation_winrate, test_winrate, occurrence, gap)
+            if validation_winrate < self.exploration_min_winrate:
+                return ValidationResult(False, "validation_winrate_below_threshold_exploration", c, train_winrate, validation_winrate, test_winrate, occurrence, gap)
+            if gap > self.exploration_max_gap:
+                return ValidationResult(False, "train_test_gap_too_large_exploration", c, train_winrate, validation_winrate, test_winrate, occurrence, gap)
+            return ValidationResult(True, "accepted_exploration", c, train_winrate, validation_winrate, test_winrate, occurrence, gap)
 
         if occurrence < self.min_occurrence:
             return ValidationResult(False, "insufficient_occurrence", c, train_winrate, validation_winrate, test_winrate, occurrence, gap)
