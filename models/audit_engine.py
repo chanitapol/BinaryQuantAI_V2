@@ -68,6 +68,14 @@ class AuditEngine:
         if dup_rows > 0:
             issues.append(f"dataset contains {dup_rows} duplicate rows")
 
+        # Feature leakage guardrails
+        leakage_flags = self._feature_leakage_metrics(df)
+        metrics["feature_leakage"] = leakage_flags
+        if leakage_flags.get("raw_price_like_features", 0) > 0:
+            issues.append("raw price-like features detected in research dataframe")
+        if leakage_flags.get("future_shift_like_features", 0) > 0:
+            issues.append("potential future-shift leakage features detected")
+
         # Split label / target balance proxy
         for name, part in (("train", split.train), ("validation", split.validation), ("test", split.test)):
             part_metrics = self._label_balance_metrics(part)
@@ -97,3 +105,13 @@ class AuditEngine:
                     "top_label_count": int(counts.iloc[0]) if not counts.empty else 0,
                 }
         return {"label_column": None, "distinct_labels": 0, "top_label_count": 0}
+
+    @staticmethod
+    def _feature_leakage_metrics(df: pd.DataFrame) -> dict[str, int]:
+        cols = set(df.columns)
+        raw_price_like = sum(col in cols for col in ("open", "high", "low", "close", "prev_open", "prev_close", "prev_high", "prev_low"))
+        future_like = sum(col.startswith(("future_", "next_", "lead_")) for col in cols)
+        return {
+            "raw_price_like_features": int(raw_price_like),
+            "future_shift_like_features": int(future_like),
+        }
