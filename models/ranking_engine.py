@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from math import sqrt
-from typing import Iterable
 
 import pandas as pd
 
@@ -23,9 +22,10 @@ class RankingResult:
 class RankingEngine:
     """Score hypotheses using winrate, expectancy, confidence and stability."""
 
-    def __init__(self, payout: float = 0.80, min_occurrence: int = 1000) -> None:
+    def __init__(self, payout: float = 0.80, min_occurrence: int = 1000, exploration_mode: bool = False) -> None:
         self.payout = payout
         self.min_occurrence = min_occurrence
+        self.exploration_mode = exploration_mode
 
     def expectancy(self, winrate: float) -> float:
         return (winrate * self.payout) - ((1.0 - winrate) * 1.0)
@@ -59,14 +59,22 @@ class RankingEngine:
         conf = self.confidence(winrate, occurrence)
         stab = self.stability(train_winrate, validation_winrate, test_winrate)
 
-        # Weighted score with a penalty for large train/test divergence.
-        score = (
-            0.35 * winrate
-            + 0.30 * max(exp, 0.0)
-            + 0.20 * conf
-            + 0.15 * stab
-            - 0.50 * gap
-        )
+        if self.exploration_mode:
+            score = (
+                0.45 * winrate
+                + 0.20 * exp
+                + 0.15 * conf
+                + 0.15 * stab
+                - 0.25 * gap
+            )
+        else:
+            score = (
+                0.35 * winrate
+                + 0.30 * max(exp, 0.0)
+                + 0.20 * conf
+                + 0.15 * stab
+                - 0.50 * gap
+            )
         return score, exp, conf, stab
 
     def rank_rows(self, results_df: pd.DataFrame) -> pd.DataFrame:
