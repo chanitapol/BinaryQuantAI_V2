@@ -360,6 +360,30 @@ class EvolutionEngine:
     def _best_hypothesis_rows(self, top_n: int = 20) -> pd.DataFrame:
         return self._eligible_rankings(top_n)
 
+    def _semantic_parent_rows(self, top_n: int = 20) -> pd.DataFrame:
+        rankings = self._eligible_rankings(top_n)
+        if rankings.empty:
+            return rankings
+        hypotheses = self.query.hypotheses_by_ids(rankings["hypothesis_id"].astype(str).tolist())
+        if hypotheses.empty:
+            return pd.DataFrame()
+        hmap = {str(row["id"]): row for _, row in hypotheses.iterrows()}
+        rows: list[dict[str, Any]] = []
+        for _, r in rankings.iterrows():
+            hid = str(r["hypothesis_id"])
+            hrow = hmap.get(hid)
+            if hrow is None:
+                continue
+            parsed = self._safe_json_loads(hrow.get("conditions"))
+            cond_features = [str(c.get("feature")) for c in parsed if c.get("feature") is not None]
+            if not cond_features:
+                continue
+            if any(self._is_allowed_feature(f) for f in cond_features):
+                rows.append({**r.to_dict(), "condition_features": cond_features})
+        if not rows:
+            return pd.DataFrame()
+        return pd.DataFrame(rows).reset_index(drop=True)
+
     def _exploration_proposals(self, top_n: int = 20) -> list[dict]:
         print(f"[Evolution] Exploration fallback activated (top_n={top_n})")
         thresholds = self._best_thresholds_safe(max(top_n * 4, 40), require_evidence=False)
@@ -400,16 +424,18 @@ class EvolutionEngine:
         return proposals
 
     def evolve_from_rankings(self, top_n: int = 20) -> list[dict]:
-        rankings = self._best_hypothesis_rows(top_n)
+        semantic_parents = self._semantic_parent_rows(top_n)
+        if semantic_parents.empty:
+            rankings = self._best_hypothesis_rows(top_n)
+        else:
+            rankings = semantic_parents
+
         if rankings.empty:
             return self._exploration_proposals(top_n)
 
         parent_ids = rankings["hypothesis_id"].astype(str).tolist()
         hypotheses = self.query.hypotheses_by_ids(parent_ids)
         hyp_map = {str(row["id"]): row for _, row in hypotheses.iterrows()} if not hypotheses.empty else {}
-
-        thresholds = self._best_thresholds_safe(50, require_evidence=False)
-        candidate_features = [str(x) for x in thresholds["feature"].dropna().astype(str).tolist()] if not thresholds.empty else []
 
         proposals: list[dict] = []
         for _, r in rankings.iterrows():
@@ -425,6 +451,7 @@ class EvolutionEngine:
             ]
             if not conditions:
                 continue
+            candidate_features = [c.feature for c in conditions if self._is_allowed_feature(c.feature)]
             child_conditions = self._make_child_conditions(conditions, candidate_features)
             if not child_conditions:
                 continue
