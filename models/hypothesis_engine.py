@@ -6,7 +6,6 @@ from itertools import combinations
 import json
 import sqlite3
 from pathlib import Path
-from typing import Iterable
 
 import numpy as np
 import pandas as pd
@@ -28,15 +27,7 @@ class Hypothesis:
 
 
 class HypothesisEngine:
-    """Knowledge-guided hypothesis generator.
-
-    V3.2 behavior:
-    - Prefer feature_statistics and threshold_statistics from research.db when available.
-    - Exclude raw OHLCV columns.
-    - Prefer semantic indicator and regime features when present.
-    - Fall back to dataframe quantiles when knowledge tables are empty.
-    - Support both legacy generate(feature_rules=...) and dataframe-driven generation.
-    """
+    """Knowledge-guided hypothesis generator."""
 
     EXCLUDE_COLUMNS = {
         "id",
@@ -48,6 +39,22 @@ class HypothesisEngine:
         "close",
         "volume",
         "direction",
+    }
+
+    BLOCKED_FEATURES = {
+        "open",
+        "high",
+        "low",
+        "close",
+        "prev_open",
+        "prev_close",
+        "prev_high",
+        "prev_low",
+        "rolling_mean_5",
+        "rolling_mean_10",
+        "rolling_mean_20",
+        "rolling_std_10",
+        "rolling_std_20",
     }
 
     SEMANTIC_PRIORITY_PREFIXES = (
@@ -138,17 +145,14 @@ class HypothesisEngine:
 
     def _numeric_features(self, df: pd.DataFrame) -> list[str]:
         cols = df.select_dtypes(include=np.number).columns
-        return [c for c in cols if c not in self.EXCLUDE_COLUMNS]
+        return [c for c in cols if c not in self.EXCLUDE_COLUMNS and c not in self.BLOCKED_FEATURES]
 
     def _semantic_features(self, df: pd.DataFrame) -> list[str]:
         cols = self._numeric_features(df)
-        semantic = [
-            c for c in cols
-            if c in self.SEMANTIC_FEATURE_ALLOWLIST or c.startswith(self.SEMANTIC_PRIORITY_PREFIXES)
-        ]
+        semantic = [c for c in cols if c in self.SEMANTIC_FEATURE_ALLOWLIST or c.startswith(self.SEMANTIC_PRIORITY_PREFIXES)]
         if semantic:
             return semantic
-        return [c for c in cols if c not in self.EXCLUDE_COLUMNS]
+        return [c for c in cols if c not in self.EXCLUDE_COLUMNS and c not in self.BLOCKED_FEATURES]
 
     def _best_features_from_db(self) -> list[str]:
         path = Path(self.research_db)
@@ -210,7 +214,10 @@ class HypothesisEngine:
             threshold = row.get("threshold")
             if feature is None or operator is None:
                 continue
-            out.setdefault(str(feature), []).append((str(operator), self._parse_threshold(threshold)))
+            feat = str(feature)
+            if feat in self.BLOCKED_FEATURES:
+                continue
+            out.setdefault(feat, []).append((str(operator), self._parse_threshold(threshold)))
         return out
 
     @staticmethod
@@ -292,11 +299,11 @@ class HypothesisEngine:
             return []
 
         semantic = [c for c in self._semantic_features(df) if c in cols]
-        learned = [f for f in self._best_features_from_db() if f in cols]
+        learned = [f for f in self._best_features_from_db() if f in cols and f not in self.BLOCKED_FEATURES]
         ordered: list[str] = []
         for bucket in (semantic, learned, cols):
             for c in bucket:
-                if c not in ordered and c not in self.EXCLUDE_COLUMNS:
+                if c not in ordered and c not in self.EXCLUDE_COLUMNS and c not in self.BLOCKED_FEATURES:
                     ordered.append(c)
         return ordered[: self.max_features]
 
@@ -312,6 +319,8 @@ class HypothesisEngine:
                 "n_unique": int(df[c].nunique(dropna=True)),
                 "missing": int(df[c].isna().sum()),
             })
+        if not rows:
+            return pd.DataFrame(columns=["feature", "is_semantic", "dtype", "n_unique", "missing"])
         return pd.DataFrame(rows).sort_values(["is_semantic", "n_unique", "feature"], ascending=[False, False, True]).reset_index(drop=True)
 
     def diagnostics(self, df: pd.DataFrame) -> dict[str, object]:
@@ -346,6 +355,8 @@ class HypothesisEngine:
         for feature in features:
             if feature not in df.columns:
                 continue
+            if feature in self.BLOCKED_FEATURES:
+                continue
             if df[feature].nunique(dropna=True) < 10:
                 continue
 
@@ -361,14 +372,7 @@ class HypothesisEngine:
                         if sig in seen:
                             continue
                         seen.add(sig)
-                        hypotheses.append(
-                            Hypothesis(
-                                id=f"H{hid:06d}",
-                                direction=direction,
-                                conditions=cond,
-                                signature=sig,
-                            )
-                        )
+                        hypotheses.append(Hypothesis(id=f"H{hid:06d}", direction=direction, conditions=cond, signature=sig))
                         hid += 1
 
         return hypotheses
@@ -387,6 +391,8 @@ class HypothesisEngine:
             return []
 
         for f1, f2 in combinations(top, 2):
+            if f1 in self.BLOCKED_FEATURES or f2 in self.BLOCKED_FEATURES:
+                continue
             if f1 not in df.columns or f2 not in df.columns:
                 continue
             if df[f1].nunique(dropna=True) < 10 or df[f2].nunique(dropna=True) < 10:
@@ -410,14 +416,7 @@ class HypothesisEngine:
                         if sig in seen:
                             continue
                         seen.add(sig)
-                        hypotheses.append(
-                            Hypothesis(
-                                id=f"H{hid:06d}",
-                                direction=direction,
-                                conditions=cond,
-                                signature=sig,
-                            )
-                        )
+                        hypotheses.append(Hypothesis(id=f"H{hid:06d}", direction=direction, conditions=cond, signature=sig))
                         hid += 1
 
         return hypotheses
@@ -448,10 +447,5 @@ class HypothesisEngine:
         if feature_rules:
             hid = 1
             for name, rule in feature_rules.items():
-                yield Hypothesis(
-                    id=f"H{hid:06d}",
-                    direction="AUTO",
-                    conditions=[Condition(name, rule[0], rule[1])],
-                    signature=name,
-                )
+                yield Hypothesis(id=f"H{hid:06d}", direction="AUTO", conditions=[Condition(name, rule[0], rule[1])], signature=name)
                 hid += 1
