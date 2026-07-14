@@ -7,6 +7,7 @@ from math import sqrt
 @dataclass
 class ValidationResult:
     passed: bool
+    status: str
     reason: str
     confidence: float
     train_winrate: float
@@ -27,6 +28,9 @@ class ValidationEngine:
         exploration_min_winrate: float = 0.55,
         exploration_min_occurrence: int = 25,
         exploration_max_gap: float = 0.12,
+        watch_min_winrate: float = 0.52,
+        watch_min_occurrence: int = 10,
+        watch_max_gap: float = 0.20,
     ) -> None:
         self.min_winrate = min_winrate
         self.min_occurrence = min_occurrence
@@ -34,6 +38,9 @@ class ValidationEngine:
         self.exploration_min_winrate = exploration_min_winrate
         self.exploration_min_occurrence = exploration_min_occurrence
         self.exploration_max_gap = exploration_max_gap
+        self.watch_min_winrate = watch_min_winrate
+        self.watch_min_occurrence = watch_min_occurrence
+        self.watch_max_gap = watch_max_gap
 
     def confidence(self, winrate: float, occurrence: int) -> float:
         if occurrence <= 0:
@@ -53,26 +60,34 @@ class ValidationEngine:
 
         if mode == "exploration":
             if occurrence < self.exploration_min_occurrence:
-                return ValidationResult(False, "insufficient_occurrence_exploration", c, train_winrate, validation_winrate, test_winrate, occurrence, gap)
+                if occurrence >= self.watch_min_occurrence and validation_winrate >= self.watch_min_winrate and gap <= self.watch_max_gap:
+                    return ValidationResult(False, "watch_exploration", "watch_exploration", c, train_winrate, validation_winrate, test_winrate, occurrence, gap)
+                return ValidationResult(False, "REJECT", "insufficient_occurrence_exploration", c, train_winrate, validation_winrate, test_winrate, occurrence, gap)
             if validation_winrate < self.exploration_min_winrate:
-                return ValidationResult(False, "validation_winrate_below_threshold_exploration", c, train_winrate, validation_winrate, test_winrate, occurrence, gap)
+                if validation_winrate >= self.watch_min_winrate and occurrence >= self.watch_min_occurrence and gap <= self.watch_max_gap:
+                    return ValidationResult(False, "watch_exploration", "watch_exploration", c, train_winrate, validation_winrate, test_winrate, occurrence, gap)
+                return ValidationResult(False, "REJECT", "validation_winrate_below_threshold_exploration", c, train_winrate, validation_winrate, test_winrate, occurrence, gap)
             if gap > self.exploration_max_gap:
-                return ValidationResult(False, "train_test_gap_too_large_exploration", c, train_winrate, validation_winrate, test_winrate, occurrence, gap)
-            return ValidationResult(True, "accepted_exploration", c, train_winrate, validation_winrate, test_winrate, occurrence, gap)
+                if validation_winrate >= self.watch_min_winrate and occurrence >= self.watch_min_occurrence and gap <= self.watch_max_gap:
+                    return ValidationResult(False, "watch_exploration", "watch_exploration", c, train_winrate, validation_winrate, test_winrate, occurrence, gap)
+                return ValidationResult(False, "REJECT", "train_test_gap_too_large_exploration", c, train_winrate, validation_winrate, test_winrate, occurrence, gap)
+            return ValidationResult(True, "PASS", "accepted_exploration", c, train_winrate, validation_winrate, test_winrate, occurrence, gap)
 
         if occurrence < self.min_occurrence:
-            return ValidationResult(False, "insufficient_occurrence", c, train_winrate, validation_winrate, test_winrate, occurrence, gap)
+            if occurrence >= self.watch_min_occurrence and validation_winrate >= self.watch_min_winrate and gap <= self.watch_max_gap:
+                return ValidationResult(False, "watch_production", "watch_production", c, train_winrate, validation_winrate, test_winrate, occurrence, gap)
+            return ValidationResult(False, "REJECT", "insufficient_occurrence", c, train_winrate, validation_winrate, test_winrate, occurrence, gap)
 
         if train_winrate < self.min_winrate:
-            return ValidationResult(False, "train_winrate_below_threshold", c, train_winrate, validation_winrate, test_winrate, occurrence, gap)
+            return ValidationResult(False, "REJECT", "train_winrate_below_threshold", c, train_winrate, validation_winrate, test_winrate, occurrence, gap)
 
         if validation_winrate < self.min_winrate:
-            return ValidationResult(False, "validation_winrate_below_threshold", c, train_winrate, validation_winrate, test_winrate, occurrence, gap)
+            return ValidationResult(False, "REJECT", "validation_winrate_below_threshold", c, train_winrate, validation_winrate, test_winrate, occurrence, gap)
 
         if test_winrate < self.min_winrate:
-            return ValidationResult(False, "test_winrate_below_threshold", c, train_winrate, validation_winrate, test_winrate, occurrence, gap)
+            return ValidationResult(False, "REJECT", "test_winrate_below_threshold", c, train_winrate, validation_winrate, test_winrate, occurrence, gap)
 
         if gap > self.max_gap:
-            return ValidationResult(False, "train_test_gap_too_large", c, train_winrate, validation_winrate, test_winrate, occurrence, gap)
+            return ValidationResult(False, "REJECT", "train_test_gap_too_large", c, train_winrate, validation_winrate, test_winrate, occurrence, gap)
 
-        return ValidationResult(True, "accepted", c, train_winrate, validation_winrate, test_winrate, occurrence, gap)
+        return ValidationResult(True, "PASS", "accepted", c, train_winrate, validation_winrate, test_winrate, occurrence, gap)
