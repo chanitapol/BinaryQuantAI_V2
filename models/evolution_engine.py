@@ -334,6 +334,8 @@ class EvolutionEngine:
             print("[Evolution] No rankings returned")
             return pd.DataFrame()
         rankings = rankings.copy()
+        if "status" in rankings.columns:
+            rankings = rankings[rankings["status"].astype(str).eq("PASS")].copy()
         if "occurrence" not in rankings.columns or "expectancy" not in rankings.columns:
             print("[Evolution] Rankings missing occurrence/expectancy columns")
             return pd.DataFrame()
@@ -444,8 +446,7 @@ class EvolutionEngine:
             if hrow is None:
                 continue
             parsed = self._safe_json_loads(hrow.get("conditions"))
-            # Preserve all parent conditions, including non-semantic ones, because
-            # accepted parents have already passed the discovery gate.
+            # Preserve all parent conditions, including non-semantic ones.
             conditions = [
                 Condition(cond.get("feature"), cond.get("operator"), cond.get("value"))
                 for cond in parsed
