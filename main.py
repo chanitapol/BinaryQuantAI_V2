@@ -29,7 +29,7 @@ def _evaluate_hypotheses(hypotheses, split, runner, validator, ranking_engine, k
             mode=mode,
         )
 
-        if validation.passed:
+        if validation.status == "PASS":
             print(hyp.id, train_result.winrate, validation_result.winrate, test_result.winrate, validation_result.occurrence)
 
         score, expectancy, confidence, stability = ranking_engine.score(
@@ -53,7 +53,7 @@ def _evaluate_hypotheses(hypotheses, split, runner, validator, ranking_engine, k
             "stability": stability,
             "gap": validation.gap,
             "score": score,
-            "status": "PASS" if validation.passed else "REJECT",
+            "status": validation.status,
             "reject_reason": validation.reason,
             "runtime": 0.0,
         }
@@ -157,14 +157,14 @@ def main() -> None:
             run_id=run_id, generation=0,
         )
 
-        # Statistics are intentionally isolated to this run and generation 0.
         stats = StatisticsEngine("research.db", run_id=run_id, generation=0)
         evolution = EvolutionEngine("research.db")
-        # EvolutionEngine owns a KnowledgeQuery; scope it to the current run/generation.
         evolution.query.set_scope(run_id=run_id, generation=0)
 
         accepted = int((ranked["status"] == "PASS").sum())
+        watched = int((ranked["status"].astype(str).str.startswith("WATCH")).sum())
         print(f"Accepted hypotheses: {accepted}/{len(ranked)}")
+        print(f"Watched hypotheses  : {watched}/{len(ranked)}")
 
         print("\nTop 20 hypotheses")
         print("-" * 120)
@@ -206,7 +206,9 @@ def main() -> None:
             )
 
             accepted_evo = int((evolved_ranked["status"] == "PASS").sum())
+            watched_evo = int((evolved_ranked["status"].astype(str).str.startswith("WATCH")).sum())
             print(f"\nEvolution Accepted hypotheses: {accepted_evo}/{len(evolved_ranked)}")
+            print(f"Evolution Watched hypotheses  : {watched_evo}/{len(evolved_ranked)}")
             print("\nTop 10 evolution hypotheses")
             print("-" * 120)
             for _, row in evolved_ranked.head(10).iterrows():
@@ -219,6 +221,7 @@ def main() -> None:
                 )
         else:
             print("\nEvolution Accepted hypotheses: 0/0")
+            print("Evolution Watched hypotheses  : 0/0")
 
         knowledge.finish_run(run_id, status="COMPLETED")
         run_completed = True
