@@ -81,24 +81,30 @@ class RankingEngine:
         stab = self.stability(train_winrate, validation_winrate, test_winrate)
         evidence = self.evidence_weight(occurrence)
 
+        exp_gate = max(0.0, exp)
+        edge_gate = max(0.0, edge)
+        penalty = abs(min(0.0, exp))
+
         if self.exploration_mode:
             raw_score = (
-                0.30 * edge
-                + 0.25 * exp
+                0.45 * edge_gate
+                + 0.20 * exp_gate
                 + 0.15 * conf
-                + 0.15 * stab
-                + 0.15 * evidence
+                + 0.10 * stab
+                + 0.10 * evidence
                 - 0.25 * gap
+                - 0.35 * penalty
             )
             score = raw_score * (0.35 + 0.65 * evidence)
         else:
             raw_score = (
-                0.25 * edge
-                + 0.30 * exp
+                0.40 * edge_gate
+                + 0.20 * exp_gate
                 + 0.15 * conf
-                + 0.15 * stab
-                + 0.15 * evidence
+                + 0.10 * stab
+                + 0.10 * evidence
                 - 0.50 * gap
+                - 0.45 * penalty
             )
             score = raw_score * (0.25 + 0.75 * evidence)
 
