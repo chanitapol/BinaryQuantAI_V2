@@ -20,15 +20,19 @@ class RankingResult:
 
 
 class RankingEngine:
-    """Score hypotheses using edge, consistency, confidence, and evidence size."""
+    """Score hypotheses using breakeven-centered edge, consistency, confidence, and evidence size."""
 
     def __init__(self, payout: float = 0.80, min_occurrence: int = 1000, exploration_mode: bool = False) -> None:
         self.payout = payout
         self.min_occurrence = min_occurrence
         self.exploration_mode = exploration_mode
+        self.breakeven_winrate = 1.0 / (1.0 + self.payout)
 
     def expectancy(self, winrate: float) -> float:
         return (winrate * self.payout) - ((1.0 - winrate) * 1.0)
+
+    def edge(self, winrate: float) -> float:
+        return winrate - self.breakeven_winrate
 
     @staticmethod
     def confidence(winrate: float, occurrence: int) -> float:
@@ -62,14 +66,6 @@ class RankingEngine:
             return 1
         return 0
 
-    @staticmethod
-    def expectancy_score(expectancy: float) -> float:
-        """Convert expectancy into a signed contribution.
-
-        Positive expectancy helps; negative expectancy penalizes proportionally.
-        """
-        return expectancy
-
     def score(
         self,
         train_winrate: float,
@@ -80,28 +76,28 @@ class RankingEngine:
     ) -> tuple[float, float, float, float]:
         winrate = validation_winrate
         exp = self.expectancy(winrate)
+        edge = self.edge(winrate)
         conf = self.confidence(winrate, occurrence)
         stab = self.stability(train_winrate, validation_winrate, test_winrate)
         evidence = self.evidence_weight(occurrence)
-        exp_score = self.expectancy_score(exp)
 
         if self.exploration_mode:
             raw_score = (
-                0.25 * winrate
-                + 0.35 * exp_score
+                0.30 * edge
+                + 0.25 * exp
                 + 0.15 * conf
                 + 0.15 * stab
-                + 0.10 * evidence
+                + 0.15 * evidence
                 - 0.25 * gap
             )
             score = raw_score * (0.35 + 0.65 * evidence)
         else:
             raw_score = (
-                0.20 * winrate
-                + 0.40 * exp_score
+                0.25 * edge
+                + 0.30 * exp
                 + 0.15 * conf
                 + 0.15 * stab
-                + 0.10 * evidence
+                + 0.15 * evidence
                 - 0.50 * gap
             )
             score = raw_score * (0.25 + 0.75 * evidence)
