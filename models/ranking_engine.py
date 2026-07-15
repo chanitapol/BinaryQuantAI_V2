@@ -62,6 +62,14 @@ class RankingEngine:
             return 1
         return 0
 
+    @staticmethod
+    def expectancy_score(expectancy: float) -> float:
+        """Convert expectancy into a signed contribution.
+
+        Positive expectancy helps; negative expectancy penalizes proportionally.
+        """
+        return expectancy
+
     def score(
         self,
         train_winrate: float,
@@ -75,24 +83,25 @@ class RankingEngine:
         conf = self.confidence(winrate, occurrence)
         stab = self.stability(train_winrate, validation_winrate, test_winrate)
         evidence = self.evidence_weight(occurrence)
+        exp_score = self.expectancy_score(exp)
 
         if self.exploration_mode:
             raw_score = (
-                0.30 * winrate
-                + 0.20 * max(exp, 0.0)
+                0.25 * winrate
+                + 0.35 * exp_score
                 + 0.15 * conf
                 + 0.15 * stab
-                + 0.20 * evidence
+                + 0.10 * evidence
                 - 0.25 * gap
             )
             score = raw_score * (0.35 + 0.65 * evidence)
         else:
             raw_score = (
-                0.25 * winrate
-                + 0.25 * max(exp, 0.0)
-                + 0.20 * conf
+                0.20 * winrate
+                + 0.40 * exp_score
+                + 0.15 * conf
                 + 0.15 * stab
-                + 0.15 * evidence
+                + 0.10 * evidence
                 - 0.50 * gap
             )
             score = raw_score * (0.25 + 0.75 * evidence)
