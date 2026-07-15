@@ -47,11 +47,7 @@ class RankingEngine:
         return 1.0 / (1.0 + sqrt(variance))
 
     def evidence_weight(self, occurrence: int) -> float:
-        """Smoothly reward evidence size without letting huge samples dominate forever.
-
-        The weight reaches 1.0 at min_occurrence and scales with sqrt(n) below it.
-        This strongly suppresses accidental 80-100% win rates from only a few trades.
-        """
+        """Smoothly reward evidence size without letting tiny samples dominate."""
         if occurrence <= 0:
             return 0.0
         target = max(int(self.min_occurrence), 1)
