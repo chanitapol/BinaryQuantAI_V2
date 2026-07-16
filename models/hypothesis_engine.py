@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from hashlib import sha1
 import sqlite3
 from pathlib import Path
+from itertools import combinations
 
 import numpy as np
 import pandas as pd
@@ -31,6 +32,7 @@ class HypothesisEngine:
       1. semantic event
       2. two-condition semantic setup
       3. regime + trigger + confirmation
+      4. wider multi-condition semantic combinations
 
     Raw OHLC levels and rolling price-level proxies are deliberately excluded.
     """
@@ -243,6 +245,26 @@ class HypothesisEngine:
                     ])
         return out
 
+    def _build_wider_combinations(self, df: pd.DataFrame) -> list[Hypothesis]:
+        out: list[Hypothesis] = []
+        seen: set[str] = set()
+        semantic_candidates = [
+            *self._available(df, self.BUY_EVENTS | self.SELL_EVENTS | self.NEUTRAL_EVENTS),
+        ]
+        if len(semantic_candidates) < 4:
+            return out
+
+        # Build wider 3-4 condition hypotheses around the strongest semantic zones.
+        for combo in combinations(semantic_candidates[: min(len(semantic_candidates), 14)], 3):
+            combo_set = set(combo)
+            direction = "BUY" if len(combo_set & self.BUY_EVENTS) >= len(combo_set & self.SELL_EVENTS) else "SELL"
+            self._append(out, seen, direction, [self._event_condition(c) for c in combo])
+        for combo in combinations(semantic_candidates[: min(len(semantic_candidates), 12)], 4):
+            combo_set = set(combo)
+            direction = "BUY" if len(combo_set & self.BUY_EVENTS) >= len(combo_set & self.SELL_EVENTS) else "SELL"
+            self._append(out, seen, direction, [self._event_condition(c) for c in combo])
+        return out
+
     def _continuous_fallback(self, df: pd.DataFrame) -> list[Hypothesis]:
         """Fallback only when semantic event columns are absent.
 
@@ -283,6 +305,8 @@ class HypothesisEngine:
             hypotheses.extend(self._build_semantic_pairs(df))
         if max_features >= 3:
             hypotheses.extend(self._build_regime_trigger_confirmation(df))
+        if max_features >= 4:
+            hypotheses.extend(self._build_wider_combinations(df))
 
         if not hypotheses:
             hypotheses.extend(self._continuous_fallback(df))
@@ -309,10 +333,8 @@ class HypothesisEngine:
                 elif name in self.SELL_EVENTS:
                     direction = "SELL"
                 conditions = [Condition(name, rule[0], rule[1])]
-                yield Hypothesis(
-                    id=f"H{hid:06d}",
-                    direction=direction,
-                    conditions=conditions,
-                    signature=self._signature(direction, conditions),
-                )
+                sig = self._signature(direction, conditions)
+                yield Hypothesis(id=f"H{hid:06d}", direction=direction, conditions=conditions, signature=sig)
                 hid += 1
+            return
+        raise ValueError("feature_rules required for generate()")
